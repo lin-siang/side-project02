@@ -42,6 +42,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .nav-item { padding: 14px 20px; font-size: 15px; color: var(--text3); cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; position: relative; letter-spacing: 0.03em; }
 .nav-item:hover { color: var(--text2); }
 .nav-item.active { color: var(--gold); border-bottom-color: var(--gold); }
+.nav-item.nav-locked { cursor: not-allowed; opacity: 0.35; pointer-events: none; }
 
 .main { flex: 1; padding: 2.5rem 2rem; max-width: 1100px; margin: 0 auto; width: 100%; }
 
@@ -206,6 +207,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .booking-meta { display: flex; gap: 16px; font-size: 16px; color: var(--text3); margin-bottom: 8px; }
 .booking-meta span { display: flex; align-items: center; gap: 5px; }
 .booking-addons { display: flex; gap: 6px; flex-wrap: wrap; }
+.booking-contact { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; font-size: 14px; color: var(--text3); }
+.booking-contact span { display: flex; align-items: center; gap: 5px; }
 .b-addon { padding: 2px 8px; border: 1px solid var(--border); border-radius: 20px; font-size: 15px; color: var(--text3); }
 .booking-right { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
 .status-badge { padding: 4px 12px; border-radius: 20px; font-size: 16px; }
@@ -478,10 +481,10 @@ body.login-open { overflow: hidden; height: 100vh; }
 
   <!-- NAV -->
   <nav class="nav">
-    <div class="nav-item active" onclick="gotoScreen('s1', this)">套餐選擇</div>
-    <div class="nav-item" onclick="gotoScreen('s2', this)">日期時段</div>
-    <div class="nav-item" onclick="gotoScreen('s3', this)">確認預約</div>
-    <div class="nav-item" onclick="gotoScreen('s4', this)">我的預約</div>
+    <div class="nav-item active" onclick="navClick('s1', this)">套餐選擇</div>
+    <div class="nav-item nav-locked" onclick="navClick('s2', this)" data-step="2">日期時段</div>
+    <div class="nav-item nav-locked" onclick="navClick('s3', this)" data-step="3">確認預約</div>
+    <div class="nav-item" onclick="navClick('s4', this)">我的預約</div>
   </nav>
 
   <!-- ========== SCREEN 1: 套餐選擇 ========== -->
@@ -719,8 +722,32 @@ body.login-open { overflow: hidden; height: 100vh; }
             <div class="confirm-row"><span class="cr-label">姓名</span><span class="cr-value">陳宥廷</span></div>
             <div class="confirm-row"><span class="cr-label">身分證號</span><span class="cr-value">A12345****</span></div>
             <div class="confirm-row"><span class="cr-label">出生日期</span><span class="cr-value">1985/03/22</span></div>
-            <div class="confirm-row"><span class="cr-label">聯絡手機</span><span class="cr-value">0912-***-678</span></div>
-            <div class="confirm-row"><span class="cr-label">電子信箱</span><span class="cr-value">chen.yt@example.com</span></div>
+            <div class="confirm-row">
+              <span class="cr-label">聯絡手機</span>
+              <div style="display:flex;align-items:center;gap:8px;justify-content:flex-end;flex:1;">
+                <span id="phone-display" class="cr-value">0912-678-678</span>
+                <input type="tel" id="phone-input"
+                  style="display:none;background:var(--card);border:1px solid var(--gold-border);border-radius:6px;padding:5px 10px;font-size:15px;color:var(--text);font-family:inherit;text-align:right;width:150px;outline:none;"
+                  maxlength="20" />
+                <button type="button" id="phone-edit-btn" onclick="togglePhoneEdit()"
+                  style="background:transparent;border:1px solid var(--border);border-radius:6px;padding:4px 12px;font-size:13px;color:var(--text3);cursor:pointer;white-space:nowrap;font-family:inherit;transition:all 0.15s;flex-shrink:0;">
+                  修改
+                </button>
+              </div>
+            </div>
+            <div class="confirm-row">
+              <span class="cr-label">電子信箱</span>
+              <div style="display:flex;align-items:center;gap:8px;justify-content:flex-end;flex:1;">
+                <span id="email-display" class="cr-value">chen.yt@example.com</span>
+                <input type="email" id="email-input"
+                  style="display:none;background:var(--card);border:1px solid var(--gold-border);border-radius:6px;padding:5px 10px;font-size:15px;color:var(--text);font-family:inherit;text-align:right;width:200px;outline:none;"
+                  maxlength="80" />
+                <button type="button" id="email-edit-btn" onclick="toggleEmailEdit()"
+                  style="background:transparent;border:1px solid var(--border);border-radius:6px;padding:4px 12px;font-size:13px;color:var(--text3);cursor:pointer;white-space:nowrap;font-family:inherit;transition:all 0.15s;flex-shrink:0;">
+                  修改
+                </button>
+              </div>
+            </div>
           </div>
 
           <div class="confirm-section">
@@ -811,6 +838,10 @@ body.login-open { overflow: hidden; height: 100vh; }
             <div class="booking-addons" id="nb-addons">
               <span class="b-addon">基因甲基化分析</span>
             </div>
+            <div class="booking-contact">
+              <span id="nb-phone">預約人手機 : 0912-678-678</span>
+              <span id="nb-email">預約人Mail : chen.yt@example.com</span>
+            </div>
           </div>
           <div class="booking-right">
             <span class="status-badge status-confirmed">已確認</span>
@@ -824,7 +855,7 @@ body.login-open { overflow: hidden; height: 100vh; }
 
         <div class="booking-item" data-status="pending" data-booked="2026-04-27" data-checkup="2026-05-04">
           <div class="booking-date-block">
-            <div class="bdate-month">AUG</div>
+            <div class="bdate-month">8月</div>
             <div class="bdate-day">03</div>
             <div class="bdate-year">2025</div>
           </div>
@@ -839,6 +870,10 @@ body.login-open { overflow: hidden; height: 100vh; }
               <span class="b-addon">眼底精密攝影</span>
               <span class="b-addon">肺功能檢測</span>
             </div>
+            <div class="booking-contact">
+              <span>預約人手機 : 0912-678-678</span>
+              <span>預約人Mail : chen.yt@example.com</span>
+            </div>
           </div>
           <div class="booking-right">
             <span class="status-badge status-pending">待確認</span>
@@ -852,7 +887,7 @@ body.login-open { overflow: hidden; height: 100vh; }
 
         <div class="booking-item" data-status="done">
           <div class="booking-date-block" style="opacity:0.5;">
-            <div class="bdate-month">MAR</div>
+            <div class="bdate-month">3月</div>
             <div class="bdate-day">12</div>
             <div class="bdate-year">2025</div>
           </div>
@@ -866,6 +901,10 @@ body.login-open { overflow: hidden; height: 100vh; }
               <span class="b-addon">荷爾蒙平衡分析</span>
               <span class="b-addon">過敏原檢測</span>
             </div>
+            <div class="booking-contact">
+              <span>預約人手機 : 0912-678-678</span>
+              <span>預約人Mail : chen.yt@example.com</span>
+            </div>
           </div>
           <div class="booking-right">
             <span class="status-badge status-done">已完成</span>
@@ -878,7 +917,7 @@ body.login-open { overflow: hidden; height: 100vh; }
 
         <div class="booking-item" data-status="cancelled">
           <div class="booking-date-block" style="opacity:0.4;">
-            <div class="bdate-month">JAN</div>
+            <div class="bdate-month">1月</div>
             <div class="bdate-day">20</div>
             <div class="bdate-year">2025</div>
           </div>
@@ -889,6 +928,10 @@ body.login-open { overflow: hidden; height: 100vh; }
               <span>新竹竹科健管中心</span>
             </div>
             <div class="booking-addons"></div>
+            <div class="booking-contact">
+              <span>預約人手機 : 0912-678-678</span>
+              <span>預約人Mail : chen.yt@example.com</span>
+            </div>
           </div>
           <div class="booking-right">
             <span class="status-badge status-cancelled">已取消</span>
@@ -949,8 +992,16 @@ function gotoScreen(id, navEl) {
 
 function goNext() {
   const idx = screenOrder.indexOf(currentScreen);
+
+  // s1 → s2
+  if (idx === 0) {
+    unlockNav('s2');
+    gotoScreen('s2', document.querySelectorAll('.nav-item')[1]);
+    return;
+  }
+
+  // s2 → s3 (validate date & time first)
   if (idx === 1) {
-    // Validate date & time selected
     if (!selectedDate || !selectedTime) {
       const err = document.getElementById('dateTimeError');
       err.style.display = 'block';
@@ -962,7 +1013,12 @@ function goNext() {
       err.scrollIntoView({ behavior: 'smooth', block: 'center' });
       return;
     }
+    unlockNav('s3');
+    gotoScreen('s3', document.querySelectorAll('.nav-item')[2]);
+    return;
   }
+
+  // s3 → submit (validate terms first)
   if (idx === 2) {
     var termsEl = document.getElementById('terms');
     if (!termsEl || !termsEl.checked) {
@@ -982,10 +1038,6 @@ function goNext() {
     goConfirm();
     return;
   }
-  if (idx < 2) {
-    const next = screenOrder[idx + 1];
-    gotoScreen(next, document.querySelectorAll('.nav-item')[idx + 1]);
-  }
 }
 
 function clearDateTimeError() {
@@ -1003,7 +1055,7 @@ function goBack() {
 
 function goConfirm() {
   // ── Date block ──
-  const monthAbbr = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+  const monthAbbr = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
   if (selectedDate) {
     document.getElementById('nb-month').textContent = monthAbbr[selectedDate.m];
     document.getElementById('nb-day').textContent   = String(selectedDate.d).padStart(2,'0');
@@ -1037,8 +1089,61 @@ function goConfirm() {
   const total = pkgPrice + addonTotal;
   document.getElementById('nb-amount').textContent = 'NT$ ' + total.toLocaleString();
 
+  // ── Contact ──
+  var phoneVal = document.getElementById('phone-display');
+  var emailVal = document.getElementById('email-display');
+  var nbPhone  = document.getElementById('nb-phone');
+  var nbEmail  = document.getElementById('nb-email');
+  if (nbPhone && phoneVal) nbPhone.textContent = '預約人手機 : ' + phoneVal.textContent;
+  if (nbEmail && emailVal) nbEmail.textContent = '預約人Mail : ' + emailVal.textContent;
+
   gotoScreen('s4', document.querySelectorAll('.nav-item')[3]);
   document.getElementById('successBanner').classList.add('show');
+
+  // ── Reset s1 flow ──
+  // Clear package selection → back to default (Signature)
+  document.querySelectorAll('.pkg-card').forEach(function(c) { c.classList.remove('selected'); });
+  var defaultPkg = document.querySelector('.pkg-card[onclick*="plus"]');
+  if (defaultPkg) defaultPkg.classList.add('selected');
+  pkgPrice = 12800;
+  currentPkgId = 'plus';
+
+  // Clear all addon selections
+  document.querySelectorAll('.addon-item').forEach(function(a) { a.classList.remove('selected'); });
+  Object.keys(addonSelected).forEach(function(k) { delete addonSelected[k]; });
+  addonTotal = 0;
+  updateTotal();
+
+  // Clear s2 — date & time
+  selectedDate = null;
+  selectedTime = null;
+  document.querySelectorAll('.cal-day').forEach(function(d) { d.classList.remove('selected'); });
+  document.querySelectorAll('.time-slot').forEach(function(t) { t.classList.remove('selected'); });
+  var sumTimeEl = document.getElementById('sum-time');
+  if (sumTimeEl) sumTimeEl.textContent = '—';
+  var sumAddonEl = document.getElementById('sumAddonText');
+  if (sumAddonEl) sumAddonEl.textContent = '—';
+  var sumTotalEl = document.getElementById('sumTotal');
+  if (sumTotalEl) sumTotalEl.textContent = '12,800';
+  var dateErr = document.getElementById('dateTimeError');
+  if (dateErr) dateErr.style.display = 'none';
+
+  // Clear s3 — terms
+  var termsEl = document.getElementById('terms');
+  if (termsEl) termsEl.checked = false;
+  var termsErr = document.getElementById('termsError');
+  if (termsErr) termsErr.style.display = 'none';
+  var confirmPriceLines = document.getElementById('confirmPriceLines');
+  if (confirmPriceLines) confirmPriceLines.innerHTML = '';
+
+  // Lock s2 and s3 nav tabs again
+  unlockedSteps = { s1: true, s4: true };
+  var navItems = document.querySelectorAll('.nav-item');
+  if (navItems[1]) navItems[1].classList.add('nav-locked');
+  if (navItems[2]) navItems[2].classList.add('nav-locked');
+
+  // Re-init calendar to current month
+  initCalendar();
 }
 
 const pkgLabels = {
@@ -1282,7 +1387,7 @@ function selectDay(el, y, m, day) {
 function selectTime(el) {
   document.querySelectorAll('.time-slot').forEach(t => t.classList.remove('selected'));
   el.classList.add('selected');
-  selectedTime = el.textContent.trim().split('\n')[0].trim();
+  selectedTime = el.firstChild ? el.firstChild.textContent.trim() : el.textContent.trim().split('\n')[0].trim();
   document.getElementById('sum-time').textContent = selectedTime;
   clearDateTimeError();
 }
@@ -1845,6 +1950,86 @@ function executeCancelBooking() {
 
   showToast('已取消「' + pkg + '」的預約。');
 }
+
+var unlockedSteps = { s1: true, s4: true };
+
+function navClick(id, el) {
+  if (!unlockedSteps[id]) return;
+  gotoScreen(id, el);
+}
+
+function unlockNav(screenId) {
+  unlockedSteps[screenId] = true;
+  var order = ['s1', 's2', 's3', 's4'];
+  var navItems = document.querySelectorAll('.nav-item');
+  order.forEach(function(sid, i) {
+    if (unlockedSteps[sid] && navItems[i]) {
+      navItems[i].classList.remove('nav-locked');
+    }
+  });
+}
+
+
+function togglePhoneEdit() {
+  var display = document.getElementById('phone-display');
+  var input   = document.getElementById('phone-input');
+  var btn     = document.getElementById('phone-edit-btn');
+  var isEditing = input.style.display !== 'none';
+
+  if (!isEditing) {
+    // Enter edit mode
+    input.value = display.textContent.replace(/\*/g, '').replace(/-+/g, '').trim();
+    display.style.display = 'none';
+    input.style.display = 'inline-block';
+    btn.textContent = '確認';
+    btn.style.borderColor = 'var(--gold-border)';
+    btn.style.color = 'var(--gold)';
+    input.focus();
+    input.select();
+  } else {
+    // Save
+    var val = input.value.trim();
+    if (!val) { input.focus(); return; }
+    display.textContent = val;
+    display.style.display = '';
+    input.style.display = 'none';
+    btn.textContent = '修改';
+    btn.style.borderColor = 'var(--border)';
+    btn.style.color = 'var(--text3)';
+  }
+}
+
+function toggleEmailEdit() {
+  var display = document.getElementById('email-display');
+  var input   = document.getElementById('email-input');
+  var btn     = document.getElementById('email-edit-btn');
+  var isEditing = input.style.display !== 'none';
+  if (!isEditing) {
+    input.value = display.textContent.trim();
+    display.style.display = 'none';
+    input.style.display = 'inline-block';
+    btn.textContent = '確認';
+    btn.style.borderColor = 'var(--gold-border)';
+    btn.style.color = 'var(--gold)';
+    input.focus();
+    input.select();
+  } else {
+    var val = input.value.trim();
+    if (!val || val.indexOf('@') === -1) {
+      input.style.borderColor = 'var(--red)';
+      input.focus();
+      return;
+    }
+    input.style.borderColor = 'var(--gold-border)';
+    display.textContent = val;
+    display.style.display = '';
+    input.style.display = 'none';
+    btn.textContent = '修改';
+    btn.style.borderColor = 'var(--border)';
+    btn.style.color = 'var(--text3)';
+  }
+}
+
 </script>
 
 
