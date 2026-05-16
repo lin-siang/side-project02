@@ -4,6 +4,212 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>健康管家 — 線上健檢預約</title>
+<script>
+// ══════════════════════════════════════
+//  Google Sheets 串接設定
+//  請將 Apps Script 部署後的 URL 貼在下方
+// ══════════════════════════════════════
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbwj7mzpJxdRIx1QP7YQatHWvgHS0HD_b7sNJVr7yVWb-TlZJwUOWWRke2IPHPsmVhqw/exec'; // ← 請替換
+
+async function gasCall(params) {
+  const url = GAS_URL + '?data=' + encodeURIComponent(JSON.stringify(params));
+  try {
+    const res  = await fetch(url, { method: 'GET', redirect: 'follow', mode: 'cors' });
+    const text = await res.text();
+    return JSON.parse(text.replace(/^﻿/, '').trim());
+  } catch (e) {
+    console.error('[GAS Error]', e);
+    return { ok: false, error: e.message };
+  }
+}
+
+
+async function saveBooking(payload) {
+  if (GAS_URL.includes('YOUR_SCRIPT_ID')) {
+    return { ok: true, booking_code: 'HC-' + new Date().getFullYear() + '-' + String(Math.floor(Math.random()*99999)).padStart(5,'0') };
+  }
+  return await gasCall(Object.assign({ action: 'saveBooking' }, payload));
+}
+
+async function loadBookings() {
+  if (GAS_URL.includes('YOUR_SCRIPT_ID')) return { ok: false };
+  return await gasCall({ action: 'getBookings' });
+}
+
+async function cancelBookingDB(bookingCode) {
+  if (GAS_URL.includes('YOUR_SCRIPT_ID')) return { ok: true };
+  return await gasCall({ action: 'cancelBooking', booking_code: bookingCode });
+}
+
+// ══════════════════════════════════════
+//  我的預約：從 Google Sheets 讀取渲染
+// ══════════════════════════════════════
+var allBookings = [];  // 快取所有預約資料
+
+async function loadAndRenderBookings() {
+  var loadingEl = document.getElementById('bookingLoading');
+  var listEl    = document.getElementById('bookingList');
+  var emptyEl   = document.getElementById('bookingEmpty');
+
+  // GAS 未設定：不清空列表，保留已插入的卡片
+  if (GAS_URL.includes('YOUR_SCRIPT_ID')) {
+    var hasCards = listEl && listEl.querySelectorAll('.booking-item').length > 0;
+    if (emptyEl) emptyEl.style.display = hasCards ? 'none' : 'block';
+    return;
+  }
+
+  // GAS 已設定：從 Google Sheets 載入並覆蓋
+  if (loadingEl) loadingEl.style.display = 'block';
+  if (listEl)    listEl.innerHTML = '';
+
+  var result = await loadBookings();
+  console.log('[Bookings] API result:', JSON.stringify(result));
+
+  if (loadingEl) loadingEl.style.display = 'none';
+
+  if (!result.ok || !result.data || result.data.length === 0) {
+    if (emptyEl) emptyEl.style.display = 'block';
+    return;
+  }
+
+  allBookings = result.data;
+  if (emptyEl) emptyEl.style.display = 'none';
+  renderBookingList(allBookings);
+}
+
+function renderBookingList(bookings) {
+  var listEl  = document.getElementById('bookingList');
+  var emptyEl = document.getElementById('bookingEmpty');
+  if (!listEl) return;
+
+  listEl.innerHTML = '';
+
+  if (bookings.length === 0) {
+    if (emptyEl) emptyEl.style.display = 'block';
+    return;
+  }
+  if (emptyEl) emptyEl.style.display = 'none';
+
+  var monthMap = {
+    '01':'1月','02':'2月','03':'3月','04':'4月','05':'5月','06':'6月',
+    '07':'7月','08':'8月','09':'9月','10':'10月','11':'11月','12':'12月'
+  };
+
+  function cleanDate(raw) {
+    if (!raw) return '';
+    raw = String(raw).trim();
+    if (/^[0-9]{4}-[0-9]{2}-[0-9]{2}/.test(raw)) return raw.slice(0,10);
+    var m1 = raw.match(/^([0-9]{4})[\/.]([0-9]{1,2})[\/.]([0-9]{1,2})/);
+    if (m1) return m1[1]+'-'+('0'+m1[2]).slice(-2)+'-'+('0'+m1[3]).slice(-2);
+    var d = new Date(raw);
+    if (!isNaN(d.getTime())) {
+      return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2);
+    }
+    return raw;
+  }
+
+  bookings.forEach(function(b) {
+    // 日期格式正規化（處理 Google Sheets 回傳的各種格式）
+    b.checkup_date = cleanDate(b.checkup_date);
+    b.created_at   = cleanDate(b.created_at);
+    // 清理時段：過濾掉 Sheets 時間型別轉出的 1899 日期字串，只保留 HH:mm
+    if (b.checkup_time) {
+      var t = String(b.checkup_time).trim();
+      // 正常格式 HH:mm 直接使用
+      if (/^[0-9]{1,2}:[0-9]{2}$/.test(t)) {
+        b.checkup_time = t;
+      } else {
+        // 包含 1899 的 Date 字串：取出時分
+        var dm = t.match(/([0-9]{1,2}):([0-9]{2})(?::[0-9]{2})?/);
+        b.checkup_time = dm ? dm[1].padStart(2,'0') + ':' + dm[2] : t;
+      }
+    }
+    var status      = b.status === '已確認' ? 'confirmed' : b.status === '已取消' ? 'cancelled' : b.status === '已完成' ? 'done' : 'confirmed';
+    var statusClass = status === 'confirmed' ? 'status-confirmed' : status === 'cancelled' ? 'status-cancelled' : 'status-done';
+    var statusText  = b.status || '已確認';
+
+    // 解析日期
+    var dateParts = (b.checkup_date || '').split('-');
+    var mon = dateParts[1] ? (monthMap[dateParts[1]] || dateParts[1]) : '—';
+    var day = dateParts[2] || '—';
+    var yr  = dateParts[0] || '—';
+
+    // 日期區塊透明度
+    var fadeStyle = status === 'cancelled' || status === 'done' ? 'opacity:0.45;' : '';
+    var infoFade  = status === 'cancelled' || status === 'done' ? 'opacity:0.5;' : '';
+
+    // 今天日期
+    var now = new Date(); now.setHours(0,0,0,0);
+    var bookedDate = b.created_at ? new Date(b.created_at.split(' ')[0]) : now;
+    bookedDate.setHours(0,0,0,0);
+    var checkupDate = b.checkup_date ? new Date(b.checkup_date) : now;
+    checkupDate.setHours(0,0,0,0);
+    var daysSinceBooked   = Math.floor((now - bookedDate)   / 86400000);
+    var daysBeforeCheckup = Math.floor((checkupDate - now)  / 86400000);
+    var canChange = (daysSinceBooked <= 3) || (daysBeforeCheckup >= 3);
+
+    // 操作按鈕
+    var actions = '';
+    if (status === 'confirmed') {
+      if (canChange) actions += '<button class="btn-sm btn-sm-outline" onclick="checkReschedule(this)">改期</button>';
+      actions += '<button class="btn-sm btn-sm-danger" onclick="cancelBooking(this)">取消</button>';
+    } else if (status === 'done') {
+      actions += '<button class="btn-sm btn-sm-outline">查看報告</button>';
+    } else if (status === 'cancelled') {
+      actions += '<button class="btn-sm btn-sm-outline">重新預約</button>';
+    }
+
+    // 加選項目標籤
+    var addonTags = '';
+    if (b.addons && b.addons !== '無') {
+      addonTags = b.addons.split('、').map(function(a) {
+        return '<span class="b-addon">' + a.trim() + '</span>';
+      }).join('');
+    }
+
+    var html =
+      '<div class="booking-item" data-status="' + status + '"' +
+        ' data-booked="' + (b.created_at ? b.created_at.split(' ')[0] : '') + '"' +
+        ' data-checkup="' + (b.checkup_date || '') + '"' +
+        ' data-booking-code="' + (b.booking_code || '') + '">' +
+
+        '<div class="booking-date-block" style="' + fadeStyle + '">' +
+          '<div class="bdate-month">' + mon + '</div>' +
+          '<div class="bdate-day">' + day + '</div>' +
+          '<div class="bdate-year">' + yr + '</div>' +
+        '</div>' +
+
+        '<div class="booking-info" style="' + infoFade + '">' +
+          '<div class="booking-pkg">' + (b.package_name || '—') + '</div>' +
+          '<div class="booking-meta">' +
+            '<span>' + (b.checkup_time || '—') + ' 報到</span>' +
+            '<span>' + (b.center || '—') + '</span>' +
+            '<span>' + (b.duration || '—') + '</span>' +
+          '</div>' +
+          (addonTags ? '<div class="booking-addons">' + addonTags + '</div>' : '') +
+          '<div class="booking-contact">' +
+            '<span>預約人手機 : ' + (b.phone || '—') + '</span>' +
+            '<span>預約人Mail : ' + (b.email || '—') + '</span>' +
+          '</div>' +
+        '</div>' +
+
+        '<div class="booking-right">' +
+          '<span class="status-badge ' + statusClass + '">' + statusText + '</span>' +
+          '<div class="booking-amount" style="' + fadeStyle + '">' + (b.total_amount || '—') + '</div>' +
+          '<div class="booking-actions">' + actions + '</div>' +
+        '</div>' +
+      '</div>';
+
+    listEl.insertAdjacentHTML('beforeend', html);
+  });
+
+  // 重新執行改期按鈕評估
+  initRescheduleButtons();
+}
+
+// filterTab 改為過濾已渲染的 DOM（維持原有邏輯不變）
+
+</script>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Noto+Serif+TC:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -407,6 +613,14 @@ body.login-open { overflow: hidden; height: 100vh; }
 .modal-section-label { font-size: 12px; color: var(--text3); letter-spacing: 0.05em; margin-top: 14px; margin-bottom: 6px; }
 .modal-selected-info { background: var(--bg); border-radius: var(--radius-sm); padding: 10px 14px; font-size: 14px; color: var(--text2); margin-top: 12px; display: flex; justify-content: space-between; }
 .modal-selected-info span { color: var(--gold); }
+
+/* ── Loading Overlay ── */
+.loading-overlay { position: fixed; inset: 0; background: rgba(8,15,31,0.85); z-index: 9000; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 24px; backdrop-filter: blur(4px); }
+.loading-overlay.show { display: flex; }
+.loading-spinner { width: 52px; height: 52px; border-radius: 50%; border: 3px solid rgba(201,168,76,0.15); border-top-color: var(--gold); animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-text { font-family: 'Noto Serif TC', serif; font-size: 16px; color: var(--text2); letter-spacing: 0.08em; }
+.loading-subtext { font-size: 13px; color: var(--text3); }
 </style>
 </head>
 <body>
@@ -821,132 +1035,24 @@ body.login-open { overflow: hidden; height: 100vh; }
         <div class="tab" onclick="filterTab(this,'cancelled')">已取消</div>
       </div>
 
-      <div class="booking-list">
-        <div class="booking-item" data-status="confirmed" data-booked="2026-05-02" data-checkup="2026-06-01">
-          <div class="booking-date-block">
-            <div class="bdate-month" id="nb-month">JUL</div>
-            <div class="bdate-day" id="nb-day">15</div>
-            <div class="bdate-year" id="nb-year">2025</div>
-          </div>
-          <div class="booking-info">
-            <div class="booking-pkg" id="nb-pkg">Signature 進階全身健康管理</div>
-            <div class="booking-meta">
-              <span id="nb-time">08:30 報到</span>
-              <span id="nb-center">台北信義旗艦中心</span>
-              <span id="nb-duration">約 4–5 小時</span>
-            </div>
-            <div class="booking-addons" id="nb-addons">
-              <span class="b-addon">基因甲基化分析</span>
-            </div>
-            <div class="booking-contact">
-              <span id="nb-phone">預約人手機 : 0912-678-678</span>
-              <span id="nb-email">預約人Mail : chen.yt@example.com</span>
-            </div>
-          </div>
-          <div class="booking-right">
-            <span class="status-badge status-confirmed">已確認</span>
-            <div class="booking-amount" id="nb-amount">NT$ 16,300</div>
-            <div class="booking-actions">
-              <button class="btn-sm btn-sm-outline" onclick="checkReschedule(this)">改期</button>
-              <button class="btn-sm btn-sm-danger" onclick="cancelBooking(this)">取消</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="booking-item" data-status="pending" data-booked="2026-04-27" data-checkup="2026-05-04">
-          <div class="booking-date-block">
-            <div class="bdate-month">8月</div>
-            <div class="bdate-day">03</div>
-            <div class="bdate-year">2025</div>
-          </div>
-          <div class="booking-info">
-            <div class="booking-pkg">Essential 基礎健康評估</div>
-            <div class="booking-meta">
-              <span>09:00 報到</span>
-              <span>台北中山醫療中心</span>
-              <span>約 2–3 小時</span>
-            </div>
-            <div class="booking-addons">
-              <span class="b-addon">眼底精密攝影</span>
-              <span class="b-addon">肺功能檢測</span>
-            </div>
-            <div class="booking-contact">
-              <span>預約人手機 : 0912-678-678</span>
-              <span>預約人Mail : chen.yt@example.com</span>
-            </div>
-          </div>
-          <div class="booking-right">
-            <span class="status-badge status-pending">待確認</span>
-            <div class="booking-amount">NT$ 9,200</div>
-            <div class="booking-actions">
-              <button class="btn-sm btn-sm-outline" onclick="checkReschedule(this)">改期</button>
-              <button class="btn-sm btn-sm-danger" onclick="cancelBooking(this)">取消</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="booking-item" data-status="done">
-          <div class="booking-date-block" style="opacity:0.5;">
-            <div class="bdate-month">3月</div>
-            <div class="bdate-day">12</div>
-            <div class="bdate-year">2025</div>
-          </div>
-          <div class="booking-info" style="opacity:0.6;">
-            <div class="booking-pkg">Prestige 頂級全身精密健管</div>
-            <div class="booking-meta">
-              <span>07:30 報到</span>
-              <span>台北信義旗艦中心</span>
-            </div>
-            <div class="booking-addons">
-              <span class="b-addon">荷爾蒙平衡分析</span>
-              <span class="b-addon">過敏原檢測</span>
-            </div>
-            <div class="booking-contact">
-              <span>預約人手機 : 0912-678-678</span>
-              <span>預約人Mail : chen.yt@example.com</span>
-            </div>
-          </div>
-          <div class="booking-right">
-            <span class="status-badge status-done">已完成</span>
-            <div class="booking-amount" style="opacity:0.5;">NT$ 33,800</div>
-            <div class="booking-actions">
-              <button class="btn-sm btn-sm-outline">查看報告</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="booking-item" data-status="cancelled">
-          <div class="booking-date-block" style="opacity:0.4;">
-            <div class="bdate-month">1月</div>
-            <div class="bdate-day">20</div>
-            <div class="bdate-year">2025</div>
-          </div>
-          <div class="booking-info" style="opacity:0.45;">
-            <div class="booking-pkg">Essential 基礎健康評估</div>
-            <div class="booking-meta">
-              <span>10:00 報到</span>
-              <span>新竹竹科健管中心</span>
-            </div>
-            <div class="booking-addons"></div>
-            <div class="booking-contact">
-              <span>預約人手機 : 0912-678-678</span>
-              <span>預約人Mail : chen.yt@example.com</span>
-            </div>
-          </div>
-          <div class="booking-right">
-            <span class="status-badge status-cancelled">已取消</span>
-            <div class="booking-amount" style="opacity:0.4;">NT$ 6,800</div>
-            <div class="booking-actions">
-              <button class="btn-sm btn-sm-outline">重新預約</button>
-            </div>
-          </div>
-        </div>
+      <!-- 載入中提示 -->
+      <div id="bookingLoading" style="text-align:center;padding:3rem;color:var(--text3);font-size:15px;display:none;">
+        <div style="margin-bottom:8px;">載入預約記錄中...</div>
       </div>
-      <div style="height: 40px;"></div>
+
+      <!-- 無資料提示 -->
+      <div id="bookingEmpty" style="text-align:center;padding:3rem;color:var(--text3);font-size:15px;display:none;">
+        目前尚無預約記錄
+      </div>
+
+      <!-- 動態預約列表 -->
+      <div class="booking-list" id="bookingList"></div>
+      </div>
     </div>
+
   </main>
 
-  <!-- BOTTOM BAR (screens 1-3) -->
+  <!-- bottom bar -->
   <div class="bottom-bar-outer" id="bottomBarOuter">
   <div class="bottom-bar" id="bottomBar">
     <div class="total-display">
@@ -958,1080 +1064,8 @@ body.login-open { overflow: hidden; height: 100vh; }
       <button class="btn btn-gold" id="btnNext" onclick="goNext()">下一步：選擇日期 →</button>
     </div>
   </div>
-
+  </div>
 </div>
-
-<script>
-let currentScreen = 's1';
-document.addEventListener('DOMContentLoaded', initCalendar);
-let pkgPrice = 12800;
-let addonTotal = 0;
-
-const screenOrder = ['s1','s2','s3','s4'];
-const nextLabels = ['下一步：選擇日期 →','下一步：確認預約 →','確認送出預約',''];
-
-function gotoScreen(id, navEl) {
-  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  document.getElementById(id).classList.add('active');
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  if (navEl) navEl.classList.add('active');
-  currentScreen = id;
-  const idx = screenOrder.indexOf(id);
-  const bottomBar = document.getElementById('bottomBarOuter');
-  const btnNext = document.getElementById('btnNext');
-  const btnBack = document.getElementById('btnBack');
-  if (id === 's4') {
-    bottomBar.style.display = 'none';
-  } else {
-    bottomBar.style.display = 'flex';
-    btnNext.textContent = nextLabels[idx];
-    btnBack.style.display = idx > 0 ? 'inline-flex' : 'none';
-  }
-  window.scrollTo(0, 0);
-}
-
-function goNext() {
-  const idx = screenOrder.indexOf(currentScreen);
-
-  // s1 → s2
-  if (idx === 0) {
-    unlockNav('s2');
-    gotoScreen('s2', document.querySelectorAll('.nav-item')[1]);
-    return;
-  }
-
-  // s2 → s3 (validate date & time first)
-  if (idx === 1) {
-    if (!selectedDate || !selectedTime) {
-      const err = document.getElementById('dateTimeError');
-      err.style.display = 'block';
-      err.textContent = !selectedDate && !selectedTime
-        ? '請先選擇日期與時段，再繼續下一步。'
-        : !selectedDate
-          ? '請選擇健檢日期，再繼續下一步。'
-          : '請選擇報到時段，再繼續下一步。';
-      err.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      return;
-    }
-    unlockNav('s3');
-    gotoScreen('s3', document.querySelectorAll('.nav-item')[2]);
-    return;
-  }
-
-  // s3 → submit (validate terms first)
-  if (idx === 2) {
-    var termsEl = document.getElementById('terms');
-    if (!termsEl || !termsEl.checked) {
-      var termsErr = document.getElementById('termsError');
-      if (!termsErr) {
-        termsErr = document.createElement('div');
-        termsErr.id = 'termsError';
-        termsErr.style.cssText = 'font-size:13px;color:#e07a66;margin-top:5px;display:block;';
-        termsErr.textContent = '請先勾選同意服務條款，才能送出預約。';
-        var termsWrap = termsEl.closest('.terms-check');
-        termsWrap.insertAdjacentElement('afterend', termsErr);
-      }
-      termsErr.style.display = 'block';
-      termsEl.closest('.terms-check').scrollIntoView({ behavior: 'smooth', block: 'center' });
-      return;
-    }
-    goConfirm();
-    return;
-  }
-}
-
-function clearDateTimeError() {
-  const err = document.getElementById('dateTimeError');
-  if (err) err.style.display = 'none';
-}
-
-function goBack() {
-  const idx = screenOrder.indexOf(currentScreen);
-  if (idx > 0) {
-    const prev = screenOrder[idx - 1];
-    gotoScreen(prev, document.querySelectorAll('.nav-item')[idx - 1]);
-  }
-}
-
-function goConfirm() {
-  // ── Date block ──
-  const monthAbbr = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
-  if (selectedDate) {
-    document.getElementById('nb-month').textContent = monthAbbr[selectedDate.m];
-    document.getElementById('nb-day').textContent   = String(selectedDate.d).padStart(2,'0');
-    document.getElementById('nb-year').textContent  = selectedDate.y;
-  }
-
-  // ── Package ──
-  document.getElementById('nb-pkg').textContent      = pkgLabels[currentPkgId] || '—';
-  document.getElementById('nb-duration').textContent = calcDuration();
-
-  // ── Time ──
-  const timeEl = document.getElementById('sum-time');
-  document.getElementById('nb-time').textContent = (timeEl ? timeEl.textContent : '—') + ' 報到';
-
-  // ── Center ──
-  const sel = document.querySelector('.center-option.selected .center-option-name');
-  document.getElementById('nb-center').textContent = sel ? sel.textContent : '—';
-
-  // ── Addons ──
-  const addonsEl = document.getElementById('nb-addons');
-  const keys = Object.keys(addonSelected);
-  if (keys.length === 0) {
-    addonsEl.innerHTML = '';
-  } else {
-    addonsEl.innerHTML = keys.map(k =>
-      '<span class="b-addon">' + addonSelected[k] + '</span>'
-    ).join('');
-  }
-
-  // ── Amount ──
-  const total = pkgPrice + addonTotal;
-  document.getElementById('nb-amount').textContent = 'NT$ ' + total.toLocaleString();
-
-  // ── Contact ──
-  var phoneVal = document.getElementById('phone-display');
-  var emailVal = document.getElementById('email-display');
-  var nbPhone  = document.getElementById('nb-phone');
-  var nbEmail  = document.getElementById('nb-email');
-  if (nbPhone && phoneVal) nbPhone.textContent = '預約人手機 : ' + phoneVal.textContent;
-  if (nbEmail && emailVal) nbEmail.textContent = '預約人Mail : ' + emailVal.textContent;
-
-  gotoScreen('s4', document.querySelectorAll('.nav-item')[3]);
-  document.getElementById('successBanner').classList.add('show');
-
-  // ── Reset s1 flow ──
-  // Clear package selection → back to default (Signature)
-  document.querySelectorAll('.pkg-card').forEach(function(c) { c.classList.remove('selected'); });
-  var defaultPkg = document.querySelector('.pkg-card[onclick*="plus"]');
-  if (defaultPkg) defaultPkg.classList.add('selected');
-  pkgPrice = 12800;
-  currentPkgId = 'plus';
-
-  // Clear all addon selections
-  document.querySelectorAll('.addon-item').forEach(function(a) { a.classList.remove('selected'); });
-  Object.keys(addonSelected).forEach(function(k) { delete addonSelected[k]; });
-  addonTotal = 0;
-  updateTotal();
-
-  // Clear s2 — date & time
-  selectedDate = null;
-  selectedTime = null;
-  document.querySelectorAll('.cal-day').forEach(function(d) { d.classList.remove('selected'); });
-  document.querySelectorAll('.time-slot').forEach(function(t) { t.classList.remove('selected'); });
-  var sumTimeEl = document.getElementById('sum-time');
-  if (sumTimeEl) sumTimeEl.textContent = '—';
-  var sumAddonEl = document.getElementById('sumAddonText');
-  if (sumAddonEl) sumAddonEl.textContent = '—';
-  var sumTotalEl = document.getElementById('sumTotal');
-  if (sumTotalEl) sumTotalEl.textContent = '12,800';
-  var dateErr = document.getElementById('dateTimeError');
-  if (dateErr) dateErr.style.display = 'none';
-
-  // Clear s3 — terms
-  var termsEl = document.getElementById('terms');
-  if (termsEl) termsEl.checked = false;
-  var termsErr = document.getElementById('termsError');
-  if (termsErr) termsErr.style.display = 'none';
-  var confirmPriceLines = document.getElementById('confirmPriceLines');
-  if (confirmPriceLines) confirmPriceLines.innerHTML = '';
-
-  // Lock s2 and s3 nav tabs again
-  unlockedSteps = { s1: true, s4: true };
-  var navItems = document.querySelectorAll('.nav-item');
-  if (navItems[1]) navItems[1].classList.add('nav-locked');
-  if (navItems[2]) navItems[2].classList.add('nav-locked');
-
-  // Re-init calendar to current month
-  initCalendar();
-}
-
-const pkgLabels = {
-  basic: 'Essential 基礎健康評估',
-  plus:  'Signature 進階全身健康管理',
-  premium: 'Prestige 頂級全身精密健管'
-};
-const pkgDurations = {
-  basic: '約 2–3 小時',
-  plus:  '約 4–5 小時',
-  premium: '約 6–7 小時'
-};
-let currentPkgId = 'plus';
-
-function selectPkg(el, id, price) {
-  document.querySelectorAll('.pkg-card').forEach(c => c.classList.remove('selected'));
-  el.classList.add('selected');
-  pkgPrice = price;
-  currentPkgId = id;
-  updateTotal();
-  updateDurationDisplay();
-}
-
-
-const addonMinutes = {
-  hpv:     30,
-  dna:     60,
-  sleep:   60,
-  dental:  30,
-  allergy: 30,
-  eye:     30,
-  lung:    30,
-  hormone: 45
-};
-
-const pkgBaseMinutes = {
-  basic:   150,  // 約 2.5 小時
-  plus:    270,  // 約 4.5 小時
-  premium: 390   // 約 6.5 小時
-};
-
-function calcDuration() {
-  var base = pkgBaseMinutes[currentPkgId] || 270;
-  var extra = Object.keys(addonSelected).reduce(function(sum, k) {
-    return sum + (addonMinutes[k] || 30);
-  }, 0);
-  var total = base + extra;
-  var hrs = Math.floor(total / 60);
-  var mins = total % 60;
-  if (mins === 0) return '約 ' + hrs + ' 小時';
-  var hrsEnd = hrs + 1;
-  return '約 ' + hrs + '–' + hrsEnd + ' 小時';
-}
-
-function updateDurationDisplay() {
-  var dur = calcDuration();
-  // 確認頁預估時間
-  var confirmDur = document.querySelector('.confirm-row .cr-value');
-  document.querySelectorAll('.confirm-row').forEach(function(row) {
-    var lbl = row.querySelector('.cr-label');
-    if (lbl && lbl.textContent === '預估時間') {
-      row.querySelector('.cr-value').textContent = dur;
-    }
-  });
-  // 成功頁預估時間 (nb-duration 在 goConfirm 時設定，這裡只更新變數)
-  // nb-duration is set in goConfirm() using pkgDurations - we override that
-}
-
-const addonNames = {
-  hpv: 'HPV 病毒篩檢',
-  dna: '基因甲基化分析',
-  sleep: '睡眠品質評估',
-  dental: '牙科口腔健康',
-  allergy: '過敏原檢測（36項）',
-  eye: '眼底精密攝影',
-  lung: '肺功能檢測',
-  hormone: '荷爾蒙平衡分析'
-};
-const addonSelected = {};
-
-function toggleAddon(el, id, price) {
-  if (el.classList.contains('selected')) {
-    el.classList.remove('selected');
-    addonTotal -= price;
-    delete addonSelected[id];
-  } else {
-    el.classList.add('selected');
-    addonTotal += price;
-    addonSelected[id] = addonNames[id] || id;
-  }
-  updateTotal();
-  updateAddonDisplay();
-  updateDurationDisplay();
-}
-
-function updateAddonDisplay() {
-  const keys = Object.keys(addonSelected);
-  // Sidebar summary
-  const sumEl = document.getElementById('sumAddonText');
-  if (sumEl) sumEl.textContent = keys.length ? keys.map(k => addonSelected[k]).join('、') : '—';
-  // Confirm page tags
-  const tagsEl = document.getElementById('confirmAddonTags');
-  if (tagsEl) {
-    if (keys.length === 0) {
-      tagsEl.innerHTML = '<span style="color:var(--text3);font-size:14px;">（未加選）</span>';
-    } else {
-      tagsEl.innerHTML = keys.map(k =>
-        '<span class="addon-tag">' + addonSelected[k] + '</span>'
-      ).join('');
-    }
-  }
-  // Confirm page price breakdown - rebuild addon lines
-  const priceBox = document.getElementById('confirmPriceLines');
-  if (priceBox) {
-    priceBox.innerHTML = keys.length
-      ? keys.map(k => '<div class="price-row"><span class="price-label">' + addonSelected[k] + '</span><span class="price-value" id="price_' + k + '"></span></div>').join('')
-      : '';
-    // Fill prices from addonSelected prices
-    document.querySelectorAll('.addon-item.selected').forEach(item => {
-      const onclick = item.getAttribute('onclick');
-      const match = onclick.match(/toggleAddon\(this,\s*'(\w+)',\s*(\d+)\)/);
-      if (match) {
-        const pid = match[1], pval = parseInt(match[2]);
-        const el2 = document.getElementById('price_' + pid);
-        if (el2) el2.textContent = 'NT$ ' + pval.toLocaleString();
-      }
-    });
-  }
-}
-
-function updateTotal() {
-  const total = pkgPrice + addonTotal;
-  const fmt = total.toLocaleString();
-  document.getElementById('totalAmt').textContent = fmt;
-  const sumEl = document.getElementById('sumTotal');
-  if (sumEl) sumEl.textContent = fmt;
-  const confEl = document.getElementById('confirmTotal');
-  if (confEl) confEl.textContent = fmt;
-}
-
-// ── Dynamic calendar ──────────────────────────────
-let calYear, calMonth, selectedDate = null, selectedTime = null;
-
-function initCalendar() {
-  const now = new Date();
-  calYear = now.getFullYear();
-  calMonth = now.getMonth(); // 0-based
-  renderCalendar();
-}
-
-function changeMonth(delta) {
-  calMonth += delta;
-  if (calMonth > 11) { calMonth = 0; calYear++; }
-  if (calMonth < 0)  { calMonth = 11; calYear--; }
-  renderCalendar();
-}
-
-function renderCalendar() {
-  const label = document.getElementById('calMonthLabel');
-  const grid  = document.getElementById('calGrid');
-  if (!label || !grid) return;
-
-  const monthNames = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
-  label.textContent = calYear + ' 年 ' + monthNames[calMonth];
-
-  // Clear old days (keep 7 dow headers)
-  while (grid.children.length > 7) grid.removeChild(grid.lastChild);
-
-  const today = new Date();
-  today.setHours(0,0,0,0);
-  const minDate = new Date(today);
-  minDate.setDate(minDate.getDate() + 7);
-  const firstDay = new Date(calYear, calMonth, 1).getDay(); // 0=Sun
-  const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
-  const prevDays = new Date(calYear, calMonth, 0).getDate();
-
-  // Prev month filler
-  for (let i = firstDay - 1; i >= 0; i--) {
-    const d = document.createElement('div');
-    d.className = 'cal-day other';
-    d.textContent = prevDays - i;
-    grid.appendChild(d);
-  }
-
-  // Current month days
-  for (let day = 1; day <= daysInMonth; day++) {
-    const d = document.createElement('div');
-    const date = new Date(calYear, calMonth, day);
-    const dow = date.getDay();
-    const isPast = date < minDate;
-    const isWeekend = dow === 0 || dow === 6;
-
-    if (isPast || isWeekend) {
-      d.className = 'cal-day disabled';
-    } else {
-      d.className = 'cal-day has-slots';
-      d.onclick = function() { selectDay(this, calYear, calMonth, day); };
-    }
-
-    if (date.toDateString() === today.toDateString()) d.classList.add('today');
-
-    // Restore selected
-    if (selectedDate &&
-        selectedDate.y === calYear &&
-        selectedDate.m === calMonth &&
-        selectedDate.d === day) {
-      d.classList.add('selected');
-    }
-
-    d.textContent = day;
-    grid.appendChild(d);
-  }
-
-  // Next month filler
-  const totalCells = firstDay + daysInMonth;
-  const remainder = totalCells % 7 === 0 ? 0 : 7 - (totalCells % 7);
-  for (let i = 1; i <= remainder; i++) {
-    const d = document.createElement('div');
-    d.className = 'cal-day other';
-    d.textContent = i;
-    grid.appendChild(d);
-  }
-}
-
-function selectDay(el, y, m, day) {
-  document.querySelectorAll('.cal-day').forEach(d => d.classList.remove('selected'));
-  el.classList.add('selected');
-  selectedDate = { y, m, d: day };
-  clearDateTimeError();
-  const mn = ['01','02','03','04','05','06','07','08','09','10','11','12'];
-  const dateStr = y + '/' + mn[m] + '/' + String(day).padStart(2,'0');
-  const sumDate = document.querySelector('.sum-row .sum-value');
-  // find the date row specifically
-  document.querySelectorAll('.sum-row').forEach(row => {
-    if (row.querySelector('.sum-label') && row.querySelector('.sum-label').textContent === '日期') {
-      row.querySelector('.sum-value').textContent = dateStr;
-    }
-  });
-}
-
-function selectTime(el) {
-  document.querySelectorAll('.time-slot').forEach(t => t.classList.remove('selected'));
-  el.classList.add('selected');
-  selectedTime = el.firstChild ? el.firstChild.textContent.trim() : el.textContent.trim().split('\n')[0].trim();
-  document.getElementById('sum-time').textContent = selectedTime;
-  clearDateTimeError();
-}
-
-function selectCenter(el) {
-  document.querySelectorAll('.center-option').forEach(c => c.classList.remove('selected'));
-  el.classList.add('selected');
-}
-
-function filterTab(el, filter) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  el.classList.add('active');
-  document.querySelectorAll('.booking-item').forEach(item => {
-    const status = item.dataset.status;
-    if (filter === 'all') { item.style.display = ''; return; }
-    if (filter === 'upcoming') { item.style.display = (status === 'confirmed' || status === 'pending') ? '' : 'none'; return; }
-    if (filter === 'done') { item.style.display = status === 'done' ? '' : 'none'; return; }
-    if (filter === 'cancelled') { item.style.display = status === 'cancelled' ? '' : 'none'; return; }
-  });
-}
-
-// ===== LOGIN =====
-let captchaCode = '';
-const chars = '0123456789';
-
-function refreshCaptcha() {
-  captchaCode = '';
-  for (let i = 0; i < 4; i++) {
-    captchaCode += chars[Math.floor(Math.random() * chars.length)];
-  }
-  const display = document.getElementById('captchaDisplay');
-  if (!display) return;
-  // Render as spaced text with letter-spacing, no transforms
-  display.innerHTML = captchaCode.split('').map((c, i) => {
-    const colors = ['#e8c97a','#c9a84c','#f0d080','#d4b05c'];
-    return '<span class="captcha-char" style="color:' + colors[i] + ';font-size:26px;line-height:1;">' + c + '</span>';
-  }).join('');
-}
-
-
-function maskIdInput(el) {
-  // reconstruct raw from dataset
-  const raw = (el.dataset.raw || '').slice(0, 10).toUpperCase();
-  el.dataset.raw = raw;
-  document.getElementById('idReal').value = raw;
-
-  // Build masked: pos 0 visible, pos 1-4 masked, pos 5-9 visible
-  let masked = '';
-  for (let i = 0; i < raw.length; i++) {
-    if (i === 0 || i >= 5) masked += raw[i];
-    else masked += '●';
-  }
-  el.value = masked;
-}
-
-function idKeydown(e) {
-  const el = e.target;
-  let raw = el.dataset.raw || '';
-  if (e.key === 'Backspace') {
-    raw = raw.slice(0, -1);
-    el.dataset.raw = raw;
-    maskIdInput(el);
-    e.preventDefault();
-    return;
-  }
-  if (e.key === 'Delete') {
-    raw = '';
-    el.dataset.raw = raw;
-    maskIdInput(el);
-    e.preventDefault();
-    return;
-  }
-  if (e.key.length === 1 && raw.length < 10) {
-    raw += e.key.toUpperCase();
-    el.dataset.raw = raw;
-    maskIdInput(el);
-    e.preventDefault();
-  }
-}
-
-function initBday() {
-  const yEl = document.getElementById('bdayY');
-  for (let y = 2026; y >= 1930; y--) {
-    const o = document.createElement('option');
-    o.textContent = y;
-    yEl.appendChild(o);
-  }
-  const dEl = document.getElementById('bdayD');
-  for (let d = 1; d <= 31; d++) {
-    const o = document.createElement('option');
-    o.textContent = String(d).padStart(2,'0');
-    dEl.appendChild(o);
-  }
-}
-
-function doLogin() {
-  const id = document.getElementById('idReal').value.trim();
-  const y = document.getElementById('bdayY').value;
-  const m = document.getElementById('bdayM').value;
-  const d = document.getElementById('bdayD').value;
-  const cap = document.getElementById('captchaInput').value.trim().toUpperCase();
-  const err = document.getElementById('loginErr');
-
-  if (!id || !y || !m || !d || !cap) {
-    err.textContent = '請填寫所有欄位後再登入。';
-    err.classList.add('show');
-    return;
-  }
-  if (cap !== captchaCode) {
-    err.textContent = '驗證碼有誤，請重新輸入。';
-    err.classList.add('show');
-    refreshCaptcha();
-    document.getElementById('captchaInput').value = '';
-    return;
-  }
-  err.classList.remove('show');
-  document.getElementById('loginOverlay').classList.add('hidden');
-  document.body.classList.remove('login-open');
-}
-
-document.body.classList.add('login-open');
-initBday();
-refreshCaptcha();
-// Pre-fill demo data
-(function() {
-  // ID: A123456789 -> store raw, show masked
-  const idEl = document.getElementById('idInput');
-  idEl.dataset.raw = 'A123456789';
-  document.getElementById('idReal').value = 'A123456789';
-  idEl.value = 'A●●●456789';
-  // Birthday: 1958/03/22
-  setTimeout(() => {
-    document.getElementById('bdayY').value = '1958';
-    document.getElementById('bdayM').value = '03';
-    document.getElementById('bdayD').value = '22';
-  }, 100);
-})();
-
-
-
-// ═══════════════════════════════════════
-//  RESCHEDULE MODULE
-// ═══════════════════════════════════════
-var reschedCalYear = 0, reschedCalMonth = 0;
-var reschedDate = null, reschedTime = null;
-
-function checkReschedule(btn) {
-  var item = btn.closest('.booking-item');
-  var bookedStr  = item.dataset.booked  || '';
-  var checkupStr = item.dataset.checkup || '';
-
-  var now = new Date(); now.setHours(0,0,0,0);
-  var booked  = bookedStr  ? new Date(bookedStr)  : now;
-  var checkup = checkupStr ? new Date(checkupStr) : now;
-
-  var daysSinceBooked   = Math.floor((now - booked)   / 86400000);
-  var daysBeforeCheckup = Math.floor((checkup - now)  / 86400000);
-  var canChange = (daysSinceBooked <= 3) || (daysBeforeCheckup >= 3);
-
-  if (canChange) {
-    // Reset date & time selections
-    selectedDate = null;
-    selectedTime = null;
-    // Clear calendar selection
-    document.querySelectorAll('.cal-day').forEach(function(d) {
-      d.classList.remove('selected');
-    });
-    // Clear time selection
-    document.querySelectorAll('.time-slot').forEach(function(t) {
-      t.classList.remove('selected');
-    });
-    // Reset summary
-    var sumTimeEl = document.getElementById('sum-time');
-    if (sumTimeEl) sumTimeEl.textContent = '—';
-    // Clear date error
-    var errEl = document.getElementById('dateTimeError');
-    if (errEl) errEl.style.display = 'none';
-    // Navigate to screen 2
-    gotoScreen('s2', document.querySelectorAll('.nav-item')[1]);
-  } else {
-    // Show inline notice — no modal
-    showReschedModal(false, checkup, item.querySelector('.booking-pkg').textContent);
-  }
-}
-
-function showReschedModal(canChange, checkup, pkg) {
-  var modal  = document.getElementById('rescheduleModal');
-  var title  = document.getElementById('modalTitle');
-  var body   = document.getElementById('modalBody');
-  var footer = document.getElementById('modalFooter');
-
-  // Clear
-  body.innerHTML = '';
-  footer.innerHTML = '';
-  body.className = 'modal-body';
-
-  function fmtDate(d) {
-    return d.getFullYear() + '/' +
-      String(d.getMonth()+1).padStart(2,'0') + '/' +
-      String(d.getDate()).padStart(2,'0');
-  }
-
-  if (canChange) {
-    title.textContent = '選擇新的健檢日期';
-    reschedDate = null; reschedTime = null;
-    var now2 = new Date(); now2.setHours(0,0,0,0);
-    reschedCalYear  = now2.getFullYear();
-    reschedCalMonth = now2.getMonth();
-
-    // ── Info bar ──
-    var infoEl = document.createElement('div');
-    infoEl.style.cssText = 'font-size:13px;color:var(--text3);margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border);';
-    infoEl.textContent = '原健檢日期：' + fmtDate(checkup) + '　 ' + pkg;
-    body.appendChild(infoEl);
-
-    // ── Calendar header ──
-    var hdr = document.createElement('div');
-    hdr.className = 'modal-cal-header';
-    var lbl = document.createElement('span');
-    lbl.className = 'modal-cal-month';
-    lbl.id = 'reschedMonthLabel';
-    var navDiv = document.createElement('div');
-    navDiv.style.cssText = 'display:flex;gap:6px;';
-    var btnPrev = document.createElement('button');
-    btnPrev.className = 'cal-btn';
-    btnPrev.innerHTML = '&#8249;';
-    btnPrev.type = 'button';
-    btnPrev.onclick = function() { reschedChangeMonth(-1); };
-    var btnNext2 = document.createElement('button');
-    btnNext2.className = 'cal-btn';
-    btnNext2.innerHTML = '&#8250;';
-    btnNext2.type = 'button';
-    btnNext2.onclick = function() { reschedChangeMonth(1); };
-    navDiv.appendChild(btnPrev);
-    navDiv.appendChild(btnNext2);
-    hdr.appendChild(lbl);
-    hdr.appendChild(navDiv);
-    body.appendChild(hdr);
-
-    // ── Calendar grid ──
-    var grid = document.createElement('div');
-    grid.className = 'modal-cal-grid';
-    grid.id = 'reschedCalGrid';
-    ['日','一','二','三','四','五','六'].forEach(function(d) {
-      var dow = document.createElement('div');
-      dow.className = 'modal-cal-dow';
-      dow.textContent = d;
-      grid.appendChild(dow);
-    });
-    body.appendChild(grid);
-
-    // ── Time section ──
-    var tLbl = document.createElement('div');
-    tLbl.className = 'modal-section-label';
-    tLbl.textContent = '選擇時段';
-    body.appendChild(tLbl);
-
-    var tGrid = document.createElement('div');
-    tGrid.className = 'modal-time-grid';
-    tGrid.id = 'reschedTimeGrid';
-    body.appendChild(tGrid);
-
-    // ── Selected info bar ──
-    var selBar = document.createElement('div');
-    selBar.className = 'modal-selected-info';
-    selBar.id = 'reschedInfo';
-    selBar.innerHTML = '<span style="color:var(--text3)">尚未選擇日期與時段</span>';
-    body.appendChild(selBar);
-
-    renderReschedCal();
-    renderReschedTimes();
-
-    // ── Footer buttons ──
-    var cancelBtn = document.createElement('button');
-    cancelBtn.className = 'btn btn-outline';
-    cancelBtn.style.padding = '9px 20px';
-    cancelBtn.type = 'button';
-    cancelBtn.textContent = '取消';
-    cancelBtn.onclick = closeReschedModal;
-
-    var confirmBtn = document.createElement('button');
-    confirmBtn.className = 'btn btn-gold';
-    confirmBtn.id = 'reschedConfirmBtn';
-    confirmBtn.style.cssText = 'padding:9px 20px;opacity:0.4;cursor:not-allowed;';
-    confirmBtn.type = 'button';
-    confirmBtn.disabled = true;
-    confirmBtn.textContent = '確認改期';
-    confirmBtn.onclick = confirmResched;
-
-    footer.appendChild(cancelBtn);
-    footer.appendChild(confirmBtn);
-
-  } else {
-    title.textContent = '無法線上改期';
-    body.className = 'modal-body warn';
-    body.innerHTML =
-      '已超過可線上改期的時間範圍。<br><br>' +
-      '可改期條件：預約完成日起 <strong>3 天內</strong>，或健檢日期 <strong>3 天前</strong>。<br><br>' +
-      '請致電客服人員為您處理改期事宜：<br>' +
-      '<strong style="font-size:20px;color:var(--gold);letter-spacing:0.08em;">0800-888-888</strong>';
-
-    footer.innerHTML =
-      '<button class="btn btn-outline" style="padding:9px 20px;" type="button" onclick="closeReschedModal()">關閉</button>';
-  }
-
-  modal.classList.remove('hidden');
-}
-
-function reschedChangeMonth(delta) {
-  reschedCalMonth += delta;
-  if (reschedCalMonth > 11) { reschedCalMonth = 0; reschedCalYear++; }
-  if (reschedCalMonth < 0)  { reschedCalMonth = 11; reschedCalYear--; }
-  renderReschedCal();
-}
-
-function renderReschedCal() {
-  var lbl  = document.getElementById('reschedMonthLabel');
-  var grid = document.getElementById('reschedCalGrid');
-  if (!lbl || !grid) return;
-
-  var mNames = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
-  lbl.textContent = reschedCalYear + ' 年 ' + mNames[reschedCalMonth];
-
-  // Remove day cells (keep 7 dow headers)
-  while (grid.children.length > 7) { grid.removeChild(grid.lastChild); }
-
-  var now3 = new Date(); now3.setHours(0,0,0,0);
-  var minDate = new Date(now3); minDate.setDate(minDate.getDate() + 7);
-  var firstDow   = new Date(reschedCalYear, reschedCalMonth, 1).getDay();
-  var daysInMon  = new Date(reschedCalYear, reschedCalMonth + 1, 0).getDate();
-  var prevMonLen = new Date(reschedCalYear, reschedCalMonth, 0).getDate();
-
-  // Prev month fillers
-  for (var p = firstDow - 1; p >= 0; p--) {
-    var el = document.createElement('div');
-    el.className = 'modal-cal-day other';
-    el.textContent = prevMonLen - p;
-    grid.appendChild(el);
-  }
-
-  // Current month days
-  for (var day = 1; day <= daysInMon; day++) {
-    var el2 = document.createElement('div');
-    var dt = new Date(reschedCalYear, reschedCalMonth, day);
-    var dow2 = dt.getDay();
-    var tooSoon  = dt < minDate;
-    var weekend  = (dow2 === 0 || dow2 === 6);
-
-    if (tooSoon || weekend) {
-      el2.className = 'modal-cal-day disabled';
-    } else {
-      el2.className = 'modal-cal-day has-slots';
-      (function(d, y, m) {
-        el2.onclick = function() { selectReschedDay(el2, y, m, d); };
-      })(day, reschedCalYear, reschedCalMonth);
-    }
-    if (reschedDate && reschedDate.y === reschedCalYear &&
-        reschedDate.m === reschedCalMonth && reschedDate.d === day) {
-      el2.classList.add('selected');
-    }
-    el2.textContent = day;
-    grid.appendChild(el2);
-  }
-
-  // Next month fillers
-  var total = firstDow + daysInMon;
-  var rem = (total % 7 === 0) ? 0 : 7 - (total % 7);
-  for (var n = 1; n <= rem; n++) {
-    var el3 = document.createElement('div');
-    el3.className = 'modal-cal-day other';
-    el3.textContent = n;
-    grid.appendChild(el3);
-  }
-}
-
-function selectReschedDay(el, y, m, day) {
-  var allDays = document.querySelectorAll('.modal-cal-day');
-  for (var i = 0; i < allDays.length; i++) { allDays[i].classList.remove('selected'); }
-  el.classList.add('selected');
-  reschedDate = { y: y, m: m, d: day };
-  reschedTime = null;
-  renderReschedTimes();
-  updateReschedInfo();
-}
-
-function renderReschedTimes() {
-  var tGrid = document.getElementById('reschedTimeGrid');
-  if (!tGrid) return;
-  tGrid.innerHTML = '';
-
-  var slots = [
-    {t:'07:30',full:false},{t:'08:00',full:true},{t:'08:30',full:false},
-    {t:'09:00',full:false},{t:'09:30',full:false},{t:'10:00',full:true},
-    {t:'10:30',full:false},{t:'13:00',full:false},{t:'13:30',full:false},
-    {t:'14:00',full:false},{t:'14:30',full:true},{t:'15:00',full:false}
-  ];
-
-  slots.forEach(function(s) {
-    var el = document.createElement('div');
-    el.className = 'modal-time-slot' + (s.full ? ' full' : '');
-    el.innerHTML = s.t + (s.full ? '<br><span style="font-size:11px;">已滿</span>' : '');
-    if (!s.full) {
-      (function(time) {
-        el.onclick = function() { selectReschedTime(el, time); };
-      })(s.t);
-    }
-    tGrid.appendChild(el);
-  });
-}
-
-function selectReschedTime(el, t) {
-  var allSlots = document.querySelectorAll('.modal-time-slot');
-  for (var i = 0; i < allSlots.length; i++) { allSlots[i].classList.remove('selected'); }
-  el.classList.add('selected');
-  reschedTime = t;
-  updateReschedInfo();
-}
-
-function updateReschedInfo() {
-  var info = document.getElementById('reschedInfo');
-  var btn  = document.getElementById('reschedConfirmBtn');
-  if (!info) return;
-  var mn = ['01','02','03','04','05','06','07','08','09','10','11','12'];
-
-  if (reschedDate && reschedTime) {
-    var ds = reschedDate.y + '/' + mn[reschedDate.m] + '/' + String(reschedDate.d).padStart(2,'0');
-    info.innerHTML = '新日期：<span style="color:var(--gold)">' + ds + '</span>　時段：<span style="color:var(--gold)">' + reschedTime + '</span>';
-    if (btn) { btn.disabled = false; btn.style.opacity = '1'; btn.style.cursor = 'pointer'; }
-  } else if (reschedDate) {
-    var ds2 = reschedDate.y + '/' + mn[reschedDate.m] + '/' + String(reschedDate.d).padStart(2,'0');
-    info.innerHTML = '已選日期：<span style="color:var(--gold)">' + ds2 + '</span>　<span style="color:var(--text3)">請選擇時段</span>';
-    if (btn) { btn.disabled = true; btn.style.opacity = '0.4'; btn.style.cursor = 'not-allowed'; }
-  } else {
-    info.innerHTML = '<span style="color:var(--text3)">尚未選擇日期與時段</span>';
-    if (btn) { btn.disabled = true; btn.style.opacity = '0.4'; btn.style.cursor = 'not-allowed'; }
-  }
-}
-
-function confirmResched() {
-  if (!reschedDate || !reschedTime) return;
-  closeReschedModal();
-  var mn = ['01','02','03','04','05','06','07','08','09','10','11','12'];
-  var ds = reschedDate.y + '/' + mn[reschedDate.m] + '/' + String(reschedDate.d).padStart(2,'0');
-  showToast('改期成功！新健檢日期：' + ds + ' ' + reschedTime);
-}
-
-function closeReschedModal() {
-  document.getElementById('rescheduleModal').classList.add('hidden');
-}
-
-function showToast(msg) {
-  var t = document.getElementById('toastMsg');
-  if (!t) {
-    t = document.createElement('div');
-    t.id = 'toastMsg';
-    t.style.cssText = 'position:fixed;bottom:100px;left:50%;transform:translateX(-50%);' +
-      'background:var(--card2);border:1px solid var(--gold-border);color:var(--gold);' +
-      'padding:12px 24px;border-radius:8px;font-size:14px;z-index:9999;white-space:nowrap;' +
-      'transition:opacity 0.5s;';
-    document.body.appendChild(t);
-  }
-  t.textContent = msg;
-  t.style.opacity = '1';
-  clearTimeout(t._timer);
-  t._timer = setTimeout(function() { t.style.opacity = '0'; }, 3000);
-}
-
-
-function initRescheduleButtons() {
-  var now = new Date(); now.setHours(0,0,0,0);
-  document.querySelectorAll('.booking-item').forEach(function(item) {
-    var bookedStr  = item.dataset.booked  || '';
-    var checkupStr = item.dataset.checkup || '';
-    var btn = item.querySelector('[onclick="checkReschedule(this)"]');
-    if (!btn) return;
-    if (!bookedStr || !checkupStr) { btn.remove(); return; }
-    var booked  = new Date(bookedStr);
-    var checkup = new Date(checkupStr);
-    var daysSinceBooked   = Math.floor((now - booked)   / 86400000);
-    var daysBeforeCheckup = Math.floor((checkup - now)  / 86400000);
-    var canChange = (daysSinceBooked <= 3) || (daysBeforeCheckup >= 3);
-    if (!canChange) btn.remove();
-  });
-}
-document.addEventListener('DOMContentLoaded', initRescheduleButtons);
-
-var cancelTargetItem = null;
-
-function cancelBooking(btn) {
-  cancelTargetItem = btn.closest('.booking-item');
-  var pkg = cancelTargetItem.querySelector('.booking-pkg')
-    ? cancelTargetItem.querySelector('.booking-pkg').textContent.trim()
-    : '此預約';
-
-  var dateEl  = cancelTargetItem.querySelector('.bdate-year');
-  var monthEl = cancelTargetItem.querySelector('.bdate-month');
-  var dayEl   = cancelTargetItem.querySelector('.bdate-day');
-  var timeEl  = cancelTargetItem.querySelector('.booking-meta span');
-  var dateStr = monthEl && dayEl && dateEl
-    ? monthEl.textContent + ' ' + dayEl.textContent + '日 ' + dateEl.textContent
-    : '';
-  var timeStr = timeEl ? timeEl.textContent : '';
-
-  var body = document.getElementById('cancelModalBody');
-  body.innerHTML =
-    '<div style="margin-bottom:12px;font-size:15px;color:var(--text2);">您即將取消以下預約，此操作無法復原。</div>' +
-    '<div style="background:var(--bg);border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;">' +
-      '<div style="display:flex;justify-content:space-between;font-size:14px;">' +
-        '<span style="color:var(--text3);">套餐</span>' +
-        '<span style="color:var(--text);font-size:16px;">' + pkg + '</span>' +
-      '</div>' +
-      (dateStr ? '<div style="display:flex;justify-content:space-between;font-size:14px;">' +
-        '<span style="color:var(--text3);">健檢日期</span>' +
-        '<span style="color:var(--text);">' + dateStr + '</span>' +
-      '</div>' : '') +
-      (timeStr ? '<div style="display:flex;justify-content:space-between;font-size:14px;">' +
-        '<span style="color:var(--text3);">時段</span>' +
-        '<span style="color:var(--text);">' + timeStr + '</span>' +
-      '</div>' : '') +
-    '</div>';
-
-  document.getElementById('cancelModal').classList.remove('hidden');
-}
-
-function closeCancelModal() {
-  document.getElementById('cancelModal').classList.add('hidden');
-  cancelTargetItem = null;
-}
-
-function executeCancelBooking() {
-  if (!cancelTargetItem) return;
-  var item = cancelTargetItem;
-  var pkg  = item.querySelector('.booking-pkg') ? item.querySelector('.booking-pkg').textContent.trim() : '此預約';
-
-  item.dataset.status = 'cancelled';
-
-  var badge = item.querySelector('.status-badge');
-  if (badge) { badge.className = 'status-badge status-cancelled'; badge.textContent = '已取消'; }
-
-  var amount = item.querySelector('.booking-amount');
-  if (amount) amount.style.opacity = '0.4';
-
-  var dateBlock = item.querySelector('.booking-date-block');
-  if (dateBlock) dateBlock.style.opacity = '0.4';
-
-  var info = item.querySelector('.booking-info');
-  if (info) info.style.opacity = '0.45';
-
-  var actions = item.querySelector('.booking-actions');
-  if (actions) actions.innerHTML = '<button class="btn-sm btn-sm-outline">重新預約</button>';
-
-  closeCancelModal();
-
-  var activeTab = document.querySelector('.tab.active');
-  if (activeTab) {
-    var onclickStr = activeTab.getAttribute('onclick');
-    var match = onclickStr.match(/'([a-z]+)'/);
-    if (match) filterTab(activeTab, match[1]);
-  }
-
-  showToast('已取消「' + pkg + '」的預約。');
-}
-
-var unlockedSteps = { s1: true, s4: true };
-
-function navClick(id, el) {
-  if (!unlockedSteps[id]) return;
-  gotoScreen(id, el);
-}
-
-function unlockNav(screenId) {
-  unlockedSteps[screenId] = true;
-  var order = ['s1', 's2', 's3', 's4'];
-  var navItems = document.querySelectorAll('.nav-item');
-  order.forEach(function(sid, i) {
-    if (unlockedSteps[sid] && navItems[i]) {
-      navItems[i].classList.remove('nav-locked');
-    }
-  });
-}
-
-
-function togglePhoneEdit() {
-  var display = document.getElementById('phone-display');
-  var input   = document.getElementById('phone-input');
-  var btn     = document.getElementById('phone-edit-btn');
-  var isEditing = input.style.display !== 'none';
-
-  if (!isEditing) {
-    // Enter edit mode
-    input.value = display.textContent.replace(/\*/g, '').replace(/-+/g, '').trim();
-    display.style.display = 'none';
-    input.style.display = 'inline-block';
-    btn.textContent = '確認';
-    btn.style.borderColor = 'var(--gold-border)';
-    btn.style.color = 'var(--gold)';
-    input.focus();
-    input.select();
-  } else {
-    // Save
-    var val = input.value.trim();
-    if (!val) { input.focus(); return; }
-    display.textContent = val;
-    display.style.display = '';
-    input.style.display = 'none';
-    btn.textContent = '修改';
-    btn.style.borderColor = 'var(--border)';
-    btn.style.color = 'var(--text3)';
-  }
-}
-
-function toggleEmailEdit() {
-  var display = document.getElementById('email-display');
-  var input   = document.getElementById('email-input');
-  var btn     = document.getElementById('email-edit-btn');
-  var isEditing = input.style.display !== 'none';
-  if (!isEditing) {
-    input.value = display.textContent.trim();
-    display.style.display = 'none';
-    input.style.display = 'inline-block';
-    btn.textContent = '確認';
-    btn.style.borderColor = 'var(--gold-border)';
-    btn.style.color = 'var(--gold)';
-    input.focus();
-    input.select();
-  } else {
-    var val = input.value.trim();
-    if (!val || val.indexOf('@') === -1) {
-      input.style.borderColor = 'var(--red)';
-      input.focus();
-      return;
-    }
-    input.style.borderColor = 'var(--gold-border)';
-    display.textContent = val;
-    display.style.display = '';
-    input.style.display = 'none';
-    btn.textContent = '修改';
-    btn.style.borderColor = 'var(--border)';
-    btn.style.color = 'var(--text3)';
-  }
-}
-
-</script>
-
 
 <!-- Reschedule Modal -->
 <div class="modal-overlay hidden" id="rescheduleModal">
@@ -2062,4 +1096,484 @@ function toggleEmailEdit() {
   </div>
 </div>
 
+<script>
+// ══ Navigation ══
+const screenOrder  = ['s1','s2','s3','s4'];
+const nextLabels   = ['下一步：選擇日期 →','下一步：確認預約 →','確認送出預約',''];
+var   currentScreen = 's1';
+var   unlockedSteps = { s1: true, s4: true };
+
+function navClick(id, el) {
+  if (!unlockedSteps[id]) return;
+  gotoScreen(id, el);
+  if (id === 's4') loadAndRenderBookings();
+}
+function unlockNav(screenId) {
+  unlockedSteps[screenId] = true;
+  var order = ['s1','s2','s3','s4'];
+  var navItems = document.querySelectorAll('.nav-item');
+  order.forEach(function(sid,i){ if(unlockedSteps[sid]&&navItems[i]) navItems[i].classList.remove('nav-locked'); });
+}
+function gotoScreen(id, navEl) {
+  document.querySelectorAll('.screen').forEach(function(s){ s.classList.remove('active'); });
+  document.getElementById(id).classList.add('active');
+  document.querySelectorAll('.nav-item').forEach(function(n){ n.classList.remove('active'); });
+  if (navEl) navEl.classList.add('active');
+  currentScreen = id;
+  const idx = screenOrder.indexOf(id);
+  const bottomBar = document.getElementById('bottomBarOuter');
+  const btnNext   = document.getElementById('btnNext');
+  const btnBack   = document.getElementById('btnBack');
+  if (id === 's4') {
+    bottomBar.style.display = 'none';
+  } else {
+    bottomBar.style.display = 'flex';
+    btnNext.textContent = nextLabels[idx];
+    btnBack.style.display = idx > 0 ? 'inline-flex' : 'none';
+  }
+  window.scrollTo(0,0);
+}
+function goBack() {
+  const idx = screenOrder.indexOf(currentScreen);
+  if (idx > 0) gotoScreen(screenOrder[idx-1], document.querySelectorAll('.nav-item')[idx-1]);
+}
+function goNext() {
+  const idx = screenOrder.indexOf(currentScreen);
+  if (idx === 0) { unlockNav('s2'); gotoScreen('s2', document.querySelectorAll('.nav-item')[1]); return; }
+  if (idx === 1) {
+    if (!selectedDate || !selectedTime) {
+      const err = document.getElementById('dateTimeError');
+      err.style.display = 'block';
+      err.textContent = !selectedDate && !selectedTime ? '請先選擇日期與時段，再繼續下一步。'
+        : !selectedDate ? '請選擇健檢日期，再繼續下一步。' : '請選擇報到時段，再繼續下一步。';
+      err.scrollIntoView({ behavior:'smooth', block:'center' });
+      return;
+    }
+    unlockNav('s3'); gotoScreen('s3', document.querySelectorAll('.nav-item')[2]); return;
+  }
+  if (idx === 2) {
+    var termsEl = document.getElementById('terms');
+    if (!termsEl || !termsEl.checked) {
+      var termsErr = document.getElementById('termsError');
+      if (!termsErr) {
+        termsErr = document.createElement('div');
+        termsErr.id = 'termsError';
+        termsErr.style.cssText = 'font-size:13px;color:#e07a66;margin-top:5px;display:block;';
+        termsErr.textContent = '請先勾選同意服務條款，才能送出預約。';
+        termsEl.closest('.terms-check').insertAdjacentElement('afterend', termsErr);
+      }
+      termsErr.style.display = 'block';
+      termsEl.closest('.terms-check').scrollIntoView({ behavior:'smooth', block:'center' });
+      return;
+    }
+    goConfirm(); return;
+  }
+}
+
+// ══ Package & Addon ══
+const pkgLabels    = { basic:'Essential 基礎健康評估', plus:'Signature 進階全身健康管理', premium:'Prestige 頂級全身精密健管' };
+const pkgDurations = { basic:'約 2–3 小時', plus:'約 4–5 小時', premium:'約 6–7 小時' };
+const pkgBaseMinutes = { basic:150, plus:270, premium:390 };
+const addonNames   = { hpv:'HPV 病毒篩檢', dna:'基因甲基化分析', sleep:'睡眠品質評估', dental:'牙科口腔健康', allergy:'過敏原檢測（36項）', eye:'眼底精密攝影', lung:'肺功能檢測', hormone:'荷爾蒙平衡分析' };
+const addonMinutes = { hpv:30, dna:60, sleep:60, dental:30, allergy:30, eye:30, lung:30, hormone:45 };
+const addonSelected = {};
+var   pkgPrice = 12800, addonTotal = 0, currentPkgId = 'plus';
+
+function selectPkg(el, id, price) {
+  document.querySelectorAll('.pkg-card').forEach(function(c){ c.classList.remove('selected'); });
+  el.classList.add('selected'); pkgPrice = price; currentPkgId = id;
+  updateTotal(); updateDurationDisplay();
+}
+function toggleAddon(el, id, price) {
+  if (el.classList.contains('selected')) { el.classList.remove('selected'); addonTotal -= price; delete addonSelected[id]; }
+  else { el.classList.add('selected'); addonTotal += price; addonSelected[id] = addonNames[id] || id; }
+  updateTotal(); updateAddonDisplay(); updateDurationDisplay();
+}
+function updateTotal() {
+  var total = pkgPrice + addonTotal, fmt = total.toLocaleString();
+  document.getElementById('totalAmt').textContent = fmt;
+  var s1 = document.getElementById('sumTotal'); if(s1) s1.textContent = fmt;
+  var s2 = document.getElementById('confirmTotal'); if(s2) s2.textContent = fmt;
+}
+function updateAddonDisplay() {
+  var keys = Object.keys(addonSelected);
+  var sumEl = document.getElementById('sumAddonText'); if(sumEl) sumEl.textContent = keys.length ? keys.map(function(k){ return addonSelected[k]; }).join('、') : '—';
+  var tagsEl = document.getElementById('confirmAddonTags');
+  if(tagsEl) tagsEl.innerHTML = keys.length ? keys.map(function(k){ return '<span class="addon-tag">'+addonSelected[k]+'</span>'; }).join('') : '<span style="color:var(--text3);font-size:14px;">（未加選）</span>';
+  var pl = document.getElementById('confirmPriceLines');
+  if(pl) {
+    pl.innerHTML = '';
+    document.querySelectorAll('.addon-item.selected').forEach(function(item){
+      var m = (item.getAttribute('onclick')||'').match(/toggleAddon\(this,\s*'(\w+)',\s*(\d+)\)/);
+      if(m && addonSelected[m[1]]) {
+        var r = document.createElement('div'); r.className='price-row';
+        r.innerHTML='<span class="price-label">'+addonSelected[m[1]]+'</span><span class="price-value">NT$ '+parseInt(m[2]).toLocaleString()+'</span>';
+        pl.appendChild(r);
+      }
+    });
+  }
+}
+function calcDuration() {
+  var base = pkgBaseMinutes[currentPkgId]||270;
+  var extra = Object.keys(addonSelected).reduce(function(s,k){ return s+(addonMinutes[k]||30); },0);
+  var total = base+extra, hrs = Math.floor(total/60), mins = total%60;
+  return mins === 0 ? '約 '+hrs+' 小時' : '約 '+hrs+'–'+(hrs+1)+' 小時';
+}
+function updateDurationDisplay() {
+  var dur = calcDuration();
+  document.querySelectorAll('.confirm-row').forEach(function(row){
+    var lbl = row.querySelector('.cr-label');
+    if(lbl && lbl.textContent === '預估時間') row.querySelector('.cr-value').textContent = dur;
+  });
+}
+
+// ══ Calendar ══
+var calYear, calMonth, selectedDate=null, selectedTime=null;
+function initCalendar() {
+  var now = new Date(); calYear=now.getFullYear(); calMonth=now.getMonth(); renderCalendar();
+}
+function changeMonth(delta) {
+  calMonth+=delta;
+  if(calMonth>11){calMonth=0;calYear++;} if(calMonth<0){calMonth=11;calYear--;}
+  renderCalendar();
+}
+function renderCalendar() {
+  var lbl=document.getElementById('calMonthLabel'), grid=document.getElementById('calGrid');
+  if(!lbl||!grid) return;
+  var mNames=['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+  lbl.textContent = calYear+' 年 '+mNames[calMonth];
+  while(grid.children.length>7) grid.removeChild(grid.lastChild);
+  var today=new Date(); today.setHours(0,0,0,0);
+  var minDate=new Date(today); minDate.setDate(minDate.getDate()+7);
+  var firstDay=new Date(calYear,calMonth,1).getDay();
+  var daysInMonth=new Date(calYear,calMonth+1,0).getDate();
+  var prevDays=new Date(calYear,calMonth,0).getDate();
+  for(var p=firstDay-1;p>=0;p--){ var d=document.createElement('div'); d.className='cal-day other'; d.textContent=prevDays-p; grid.appendChild(d); }
+  for(var day=1;day<=daysInMonth;day++){
+    var d2=document.createElement('div');
+    var dt=new Date(calYear,calMonth,day), dow=dt.getDay();
+    if(dt<minDate||dow===0||dow===6){ d2.className='cal-day disabled'; }
+    else { d2.className='cal-day has-slots'; (function(el,d,y,m){ el.onclick=function(){ selectDay(el,y,m,d); }; })(d2,day,calYear,calMonth); }
+    if(selectedDate&&selectedDate.y===calYear&&selectedDate.m===calMonth&&selectedDate.d===day) d2.classList.add('selected');
+    d2.textContent=day; grid.appendChild(d2);
+  }
+  var total=firstDay+daysInMonth, rem=total%7===0?0:7-(total%7);
+  for(var n=1;n<=rem;n++){ var d3=document.createElement('div'); d3.className='cal-day other'; d3.textContent=n; grid.appendChild(d3); }
+}
+function selectDay(el,y,m,day) {
+  document.querySelectorAll('.cal-day').forEach(function(d){ d.classList.remove('selected'); });
+  el.classList.add('selected'); selectedDate={y:y,m:m,d:day}; clearDateTimeError();
+  var mn=['01','02','03','04','05','06','07','08','09','10','11','12'];
+  var ds=y+'/'+mn[m]+'/'+String(day).padStart(2,'0');
+  document.querySelectorAll('.sum-row').forEach(function(row){ var l=row.querySelector('.sum-label'); if(l&&l.textContent==='日期') row.querySelector('.sum-value').textContent=ds; });
+}
+function selectTime(el) {
+  document.querySelectorAll('.time-slot').forEach(function(t){ t.classList.remove('selected'); });
+  el.classList.add('selected');
+  selectedTime = el.firstChild ? el.firstChild.textContent.trim() : el.textContent.trim().split('\n')[0].trim();
+  document.getElementById('sum-time').textContent = selectedTime;
+  clearDateTimeError();
+}
+function clearDateTimeError() { var e=document.getElementById('dateTimeError'); if(e) e.style.display='none'; }
+function selectCenter(el) { document.querySelectorAll('.center-option').forEach(function(c){ c.classList.remove('selected'); }); el.classList.add('selected'); }
+
+// ══ Tab filter ══
+function filterTab(el, filter) {
+  document.querySelectorAll('.tab').forEach(function(t){ t.classList.remove('active'); });
+  el.classList.add('active');
+  document.querySelectorAll('.booking-item').forEach(function(item){
+    var status=item.dataset.status;
+    if(filter==='all'){ item.style.display=''; return; }
+    if(filter==='upcoming'){ item.style.display=(status==='confirmed'||status==='pending')?'':'none'; return; }
+    if(filter==='done'){ item.style.display=status==='done'?'':'none'; return; }
+    if(filter==='cancelled'){ item.style.display=status==='cancelled'?'':'none'; return; }
+  });
+}
+
+
+function showLoading(text, subtext) {
+  var el = document.getElementById('loadingOverlay');
+  var t  = document.getElementById('loadingText');
+  var s  = document.getElementById('loadingSubtext');
+  if (t) t.textContent  = text    || '處理中...';
+  if (s) s.textContent  = subtext || '請稍候';
+  if (el) el.classList.add('show');
+  document.body.style.overflow = 'hidden';
+}
+function hideLoading() {
+  var el = document.getElementById('loadingOverlay');
+  if (el) el.classList.remove('show');
+  document.body.style.overflow = '';
+}
+// ══ Login ══
+var captchaCode = '';
+var captchaChars = '0123456789';
+function refreshCaptcha() {
+  captchaCode = '';
+  for(var i=0;i<4;i++) captchaCode+=captchaChars[Math.floor(Math.random()*10)];
+  var display=document.getElementById('captchaDisplay');
+  if(!display) return;
+  var colors=['#e8c97a','#c9a84c','#f0d080','#d4b05c'];
+  display.innerHTML=captchaCode.split('').map(function(c,i){
+    return '<span class="captcha-char" style="color:'+colors[i]+';font-size:26px;line-height:1;">'+c+'</span>';
+  }).join('');
+}
+function idKeydown(e) {
+  var el=e.target, raw=el.dataset.raw||'';
+  if(e.key==='Backspace'){ raw=raw.slice(0,-1); el.dataset.raw=raw; maskIdInput(el); e.preventDefault(); return; }
+  if(e.key==='Delete'){ raw=''; el.dataset.raw=raw; maskIdInput(el); e.preventDefault(); return; }
+  if(e.key.length===1&&raw.length<10){ raw+=e.key.toUpperCase(); el.dataset.raw=raw; maskIdInput(el); e.preventDefault(); }
+}
+function maskIdInput(el) {
+  var raw=(el.dataset.raw||'').slice(0,10).toUpperCase();
+  el.dataset.raw=raw; document.getElementById('idReal').value=raw;
+  var masked='';
+  for(var i=0;i<raw.length;i++) masked+=(i===0||i>=5)?raw[i]:'●';
+  el.value=masked;
+}
+function initBday() {
+  var yEl=document.getElementById('bdayY');
+  for(var y=2026;y>=1930;y--){ var o=document.createElement('option'); o.textContent=y; yEl.appendChild(o); }
+  var dEl=document.getElementById('bdayD');
+  for(var d=1;d<=31;d++){ var o2=document.createElement('option'); o2.textContent=String(d).padStart(2,'0'); dEl.appendChild(o2); }
+}
+var currentUser = { id:'user', full_name:'陳宥廷', phone:'0912-678-678', email:'chen.yt@example.com' };
+function doLogin() {
+  var idEl=document.getElementById('idInput');
+  var y=document.getElementById('bdayY').value, m=document.getElementById('bdayM').value, d=document.getElementById('bdayD').value;
+  var cap=document.getElementById('captchaInput').value.trim().toUpperCase();
+  var err=document.getElementById('loginErr');
+  if(!idEl.dataset.raw||!y||!m||!d||!cap){ err.textContent='請填寫所有欄位後再登入。'; err.classList.add('show'); return; }
+  if(cap!==captchaCode){ err.textContent='驗證碼有誤，請重新輸入。'; err.classList.add('show'); refreshCaptcha(); document.getElementById('captchaInput').value=''; return; }
+  err.classList.remove('show');
+  document.getElementById('loginOverlay').classList.add('hidden');
+  document.body.classList.remove('login-open');
+}
+
+// ══ Phone / Email edit ══
+function togglePhoneEdit() {
+  var display=document.getElementById('phone-display'), input=document.getElementById('phone-input'), btn=document.getElementById('phone-edit-btn');
+  if(input.style.display!=='none'){ var val=input.value.trim(); if(!val){input.focus();return;}
+    // 格式化電話：保留數字，按 4-3-3 或 4-4 分段補「-」
+    var digits=val.replace(/\D/g,'');
+    if(digits.length===10){ val=digits.slice(0,4)+'-'+digits.slice(4,7)+'-'+digits.slice(7); }
+    else if(digits.length===9){ val=digits.slice(0,4)+'-'+digits.slice(4,7)+'-'+digits.slice(7); }
+    else if(digits.length>4){ val=digits.slice(0,4)+'-'+digits.slice(4); }
+    else { val=digits; }
+    display.textContent=val; display.style.display=''; input.style.display='none'; btn.textContent='修改'; btn.style.borderColor='var(--border)'; btn.style.color='var(--text3)'; }
+  else { input.value=display.textContent.trim(); display.style.display='none'; input.style.display='inline-block'; btn.textContent='確認'; btn.style.borderColor='var(--gold-border)'; btn.style.color='var(--gold)'; input.focus(); input.select(); }
+}
+function toggleEmailEdit() {
+  var display=document.getElementById('email-display'), input=document.getElementById('email-input'), btn=document.getElementById('email-edit-btn');
+  if(input.style.display!=='none'){ var val=input.value.trim(); if(!val||val.indexOf('@')===-1){input.style.borderColor='var(--red)';input.focus();return;} input.style.borderColor='var(--gold-border)'; display.textContent=val; display.style.display=''; input.style.display='none'; btn.textContent='修改'; btn.style.borderColor='var(--border)'; btn.style.color='var(--text3)'; }
+  else { input.value=display.textContent.trim(); display.style.display='none'; input.style.display='inline-block'; btn.textContent='確認'; btn.style.borderColor='var(--gold-border)'; btn.style.color='var(--gold)'; input.focus(); input.select(); }
+}
+
+// ══ Reschedule ══
+var reschedCalYear=0, reschedCalMonth=0, reschedDate=null, reschedTime=null;
+function checkReschedule(btn) {
+  var item=btn.closest('.booking-item');
+  var bookedStr=item.dataset.booked||'', checkupStr=item.dataset.checkup||'';
+  var now=new Date(); now.setHours(0,0,0,0);
+  var booked=bookedStr?new Date(bookedStr):now, checkup=checkupStr?new Date(checkupStr):now;
+  var daysSinceBooked=Math.floor((now-booked)/86400000), daysBeforeCheckup=Math.floor((checkup-now)/86400000);
+  var canChange=(daysSinceBooked<=3)||(daysBeforeCheckup>=3);
+  if(canChange){
+    selectedDate=null; selectedTime=null;
+    document.querySelectorAll('.cal-day').forEach(function(d){ d.classList.remove('selected'); });
+    document.querySelectorAll('.time-slot').forEach(function(t){ t.classList.remove('selected'); });
+    var st=document.getElementById('sum-time'); if(st) st.textContent='—';
+    var de=document.getElementById('dateTimeError'); if(de) de.style.display='none';
+    gotoScreen('s2', document.querySelectorAll('.nav-item')[1]);
+  } else {
+    var modal=document.getElementById('rescheduleModal'), title=document.getElementById('modalTitle'), body=document.getElementById('modalBody'), footer=document.getElementById('modalFooter');
+    body.innerHTML=''; footer.innerHTML=''; body.className='modal-body warn';
+    title.textContent='無法線上改期';
+    body.innerHTML='已超過可線上改期的時間範圍。<br><br>可改期條件：預約完成日起 <strong>3 天內</strong>，或健檢日期 <strong>3 天前</strong>。<br><br>請致電客服人員：<br><strong style="font-size:20px;color:var(--gold);">0800-888-888</strong>';
+    footer.innerHTML='<button class="btn btn-outline" style="padding:9px 20px;" onclick="closeReschedModal()">關閉</button>';
+    modal.classList.remove('hidden');
+  }
+}
+function closeReschedModal(){ document.getElementById('rescheduleModal').classList.add('hidden'); }
+
+// ══ Cancel ══
+var cancelTargetItem=null;
+function cancelBooking(btn) {
+  cancelTargetItem=btn.closest('.booking-item');
+  var pkg=cancelTargetItem.querySelector('.booking-pkg')?cancelTargetItem.querySelector('.booking-pkg').textContent.trim():'此預約';
+  var monthEl=cancelTargetItem.querySelector('.bdate-month'), dayEl=cancelTargetItem.querySelector('.bdate-day'), yearEl=cancelTargetItem.querySelector('.bdate-year');
+  var timeEl=cancelTargetItem.querySelector('.booking-meta span');
+  var dateStr=monthEl&&dayEl&&yearEl?monthEl.textContent+' '+dayEl.textContent+'日 '+yearEl.textContent:'';
+  var timeStr=timeEl?timeEl.textContent:'';
+  var body=document.getElementById('cancelModalBody');
+  body.innerHTML='<div style="margin-bottom:12px;font-size:15px;color:var(--text2);">您即將取消以下預約，此操作無法復原。</div>'+
+    '<div style="background:var(--bg);border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;gap:6px;">'+
+    '<div style="display:flex;justify-content:space-between;font-size:14px;"><span style="color:var(--text3);">套餐</span><span style="color:var(--text);">'+pkg+'</span></div>'+
+    (dateStr?'<div style="display:flex;justify-content:space-between;font-size:14px;"><span style="color:var(--text3);">日期</span><span style="color:var(--text);">'+dateStr+'</span></div>':'')+
+    (timeStr?'<div style="display:flex;justify-content:space-between;font-size:14px;"><span style="color:var(--text3);">時段</span><span style="color:var(--text);">'+timeStr+'</span></div>':'')+
+    '</div>';
+  document.getElementById('cancelModal').classList.remove('hidden');
+}
+function closeCancelModal(){ document.getElementById('cancelModal').classList.add('hidden'); cancelTargetItem=null; }
+async function executeCancelBooking() {
+  if(!cancelTargetItem) return;
+  var item=cancelTargetItem;
+  var pkg=item.querySelector('.booking-pkg')?item.querySelector('.booking-pkg').textContent.trim():'此預約';
+  var bookingCode=item.dataset.bookingCode||'';
+  if(bookingCode) await cancelBookingDB(bookingCode);
+  item.dataset.status='cancelled';
+  var badge=item.querySelector('.status-badge'); if(badge){ badge.className='status-badge status-cancelled'; badge.textContent='已取消'; }
+  var amount=item.querySelector('.booking-amount'); if(amount) amount.style.opacity='0.4';
+  var dateBlock=item.querySelector('.booking-date-block'); if(dateBlock) dateBlock.style.opacity='0.4';
+  var info=item.querySelector('.booking-info'); if(info) info.style.opacity='0.45';
+  var actions=item.querySelector('.booking-actions'); if(actions) actions.innerHTML='<button class="btn-sm btn-sm-outline">重新預約</button>';
+  closeCancelModal();
+  var activeTab=document.querySelector('.tab.active');
+  if(activeTab){ var m=(activeTab.getAttribute('onclick')||'').match(/'([a-z]+)'/); if(m) filterTab(activeTab,m[1]); }
+  showToast('已取消「'+pkg+'」的預約。');
+}
+function showToast(msg) {
+  var t=document.getElementById('toastMsg');
+  if(!t){ t=document.createElement('div'); t.id='toastMsg'; t.style.cssText='position:fixed;bottom:100px;left:50%;transform:translateX(-50%);background:var(--card2);border:1px solid var(--gold-border);color:var(--gold);padding:12px 24px;border-radius:8px;font-size:14px;z-index:9999;white-space:nowrap;transition:opacity 0.5s;'; document.body.appendChild(t); }
+  t.textContent=msg; t.style.opacity='1'; clearTimeout(t._timer); t._timer=setTimeout(function(){ t.style.opacity='0'; },3000);
+}
+
+// ══ Reschedule buttons init ══
+function initRescheduleButtons() {
+  var now=new Date(); now.setHours(0,0,0,0);
+  document.querySelectorAll('.booking-item').forEach(function(item){
+    var bookedStr=item.dataset.booked||'', checkupStr=item.dataset.checkup||'';
+    var btn=item.querySelector('[onclick="checkReschedule(this)"]'); if(!btn) return;
+    if(!bookedStr||!checkupStr){ btn.remove(); return; }
+    var booked=new Date(bookedStr), checkup=new Date(checkupStr);
+    var daysSinceBooked=Math.floor((now-booked)/86400000), daysBeforeCheckup=Math.floor((checkup-now)/86400000);
+    if(!((daysSinceBooked<=3)||(daysBeforeCheckup>=3))) btn.remove();
+  });
+}
+
+// ══ Google Sheets: Load & Render Bookings ══
+
+
+// ══ Confirm & Submit ══
+async function goConfirm() {
+  var phoneVal=document.getElementById('phone-display'), emailVal=document.getElementById('email-display');
+  var centerEl=document.querySelector('.center-option.selected .center-option-name');
+  var mn=['01','02','03','04','05','06','07','08','09','10','11','12'];
+  var dateStr=selectedDate?selectedDate.y+'-'+mn[selectedDate.m]+'-'+String(selectedDate.d).padStart(2,'0'):'';
+  var durMin=pkgBaseMinutes[currentPkgId]+Object.keys(addonSelected).reduce(function(s,k){ return s+(addonMinutes[k]||30); },0);
+  var payload={
+    user_id: currentUser?currentUser.id:'demo',
+    center_name: centerEl?centerEl.textContent:'',
+    package_code: currentPkgId, package_name: pkgLabels[currentPkgId]||'',
+    slot_date: dateStr, slot_time: selectedTime||'',
+    phone: phoneVal?phoneVal.textContent:'', email: emailVal?emailVal.textContent:'',
+    total_amount: 'NT$ '+(pkgPrice+addonTotal).toLocaleString(),
+    duration_min: durMin, duration: calcDuration(),
+    addon_codes: Object.keys(addonSelected).join(','), addon_names: Object.values(addonSelected).join('、'),
+    booking_date: new Date().toISOString().slice(0,10),
+    checkup_date: dateStr, checkup_time: selectedTime||'',
+    center: centerEl?centerEl.textContent:'',
+    addons: Object.values(addonSelected).join('、')||'無',
+    duration: calcDuration()
+  };
+  // 顯示 loading
+  showLoading('預約送出中...', '正在寫入預約記錄，請稍候');
+  var btnN=document.getElementById('btnNext');
+  btnN.disabled=true;
+
+  var result = await saveBooking(payload);
+
+  if(!result.ok){
+    hideLoading();
+    btnN.disabled=false;
+    showToast('預約送出失敗：'+(result.error||'請稍後再試'));
+    return;
+  }
+
+  // 短暫停留讓使用者看到成功狀態
+  document.getElementById('loadingText').textContent    = '預約成功！';
+  document.getElementById('loadingSubtext').textContent = '正在前往我的預約頁面...';
+  await new Promise(function(r){ setTimeout(r, 1200); });
+  hideLoading();
+  btnN.disabled=false;
+  var codeEl=document.querySelector('#successBanner strong'); if(codeEl) codeEl.textContent=result.booking_code;
+
+  // 直接插入一筆新預約卡片到列表最前面
+  var mn2=['01','02','03','04','05','06','07','08','09','10','11','12'];
+  var mAbbr=['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+  var dateStr2=selectedDate?selectedDate.y+'-'+mn2[selectedDate.m]+'-'+String(selectedDate.d).padStart(2,'0'):'';
+  var monTxt=selectedDate?mAbbr[selectedDate.m]:'—';
+  var dayTxt=selectedDate?String(selectedDate.d).padStart(2,'0'):'—';
+  var yrTxt=selectedDate?String(selectedDate.y):'—';
+  var centerTxt=document.querySelector('.center-option.selected .center-option-name');
+  centerTxt=centerTxt?centerTxt.textContent:'—';
+  var te=document.getElementById('sum-time');
+  var timeTxt=(te?te.textContent:'—')+' 報到';
+  var addonKeys=Object.keys(addonSelected);
+  var addonHtml=addonKeys.length?addonKeys.map(function(k){ return '<span class="b-addon">'+addonSelected[k]+'</span>'; }).join(''):'';
+  var phoneTxt=phoneVal?phoneVal.textContent:'—';
+  var emailTxt=emailVal?emailVal.textContent:'—';
+  var todayStr=new Date().toISOString().slice(0,10);
+
+  var newCard='<div class="booking-item" data-status="confirmed" data-booked="'+todayStr+'" data-checkup="'+dateStr2+'" data-booking-code="'+result.booking_code+'">'
+    +'<div class="booking-date-block"><div class="bdate-month">'+monTxt+'</div><div class="bdate-day">'+dayTxt+'</div><div class="bdate-year">'+yrTxt+'</div></div>'
+    +'<div class="booking-info">'
+      +'<div class="booking-pkg">'+(pkgLabels[currentPkgId]||'—')+'</div>'
+      +'<div class="booking-meta"><span>'+timeTxt+'</span><span>'+centerTxt+'</span><span>'+calcDuration()+'</span></div>'
+      +(addonHtml?'<div class="booking-addons">'+addonHtml+'</div>':'')
+      +'<div class="booking-contact"><span>預約人手機 : '+phoneTxt+'</span><span>預約人Mail : '+emailTxt+'</span></div>'
+    +'</div>'
+    +'<div class="booking-right">'
+      +'<span class="status-badge status-confirmed">已確認</span>'
+      +'<div class="booking-amount">NT$ '+(pkgPrice+addonTotal).toLocaleString()+'</div>'
+      +'<div class="booking-actions"><button class="btn-sm btn-sm-outline" onclick="checkReschedule(this)">改期</button><button class="btn-sm btn-sm-danger" onclick="cancelBooking(this)">取消</button></div>'
+    +'</div>'
+  +'</div>';
+
+  var listEl=document.getElementById('bookingList');
+  if(listEl) listEl.insertAdjacentHTML('afterbegin', newCard);
+  var emptyEl=document.getElementById('bookingEmpty'); if(emptyEl) emptyEl.style.display='none';
+  gotoScreen('s4', document.querySelectorAll('.nav-item')[3]);
+  document.getElementById('successBanner').classList.add('show');
+  // Reset
+  document.querySelectorAll('.pkg-card').forEach(function(c){ c.classList.remove('selected'); });
+  var dp=document.querySelector('.pkg-card[onclick*="plus"]'); if(dp) dp.classList.add('selected');
+  pkgPrice=12800; currentPkgId='plus';
+  document.querySelectorAll('.addon-item').forEach(function(a){ a.classList.remove('selected'); });
+  Object.keys(addonSelected).forEach(function(k){ delete addonSelected[k]; });
+  addonTotal=0; updateTotal(); selectedDate=null; selectedTime=null;
+  document.querySelectorAll('.cal-day').forEach(function(d){ d.classList.remove('selected'); });
+  document.querySelectorAll('.time-slot').forEach(function(t){ t.classList.remove('selected'); });
+  var st2=document.getElementById('sum-time'); if(st2) st2.textContent='—';
+  var sa=document.getElementById('sumAddonText'); if(sa) sa.textContent='—';
+  var sp=document.getElementById('sumTotal'); if(sp) sp.textContent='12,800';
+  var dte=document.getElementById('dateTimeError'); if(dte) dte.style.display='none';
+  var ter=document.getElementById('terms'); if(ter) ter.checked=false;
+  var terr2=document.getElementById('termsError'); if(terr2) terr2.style.display='none';
+  var cpl=document.getElementById('confirmPriceLines'); if(cpl) cpl.innerHTML='';
+  unlockedSteps={s1:true,s4:true};
+  var ni=document.querySelectorAll('.nav-item'); if(ni[1]) ni[1].classList.add('nav-locked'); if(ni[2]) ni[2].classList.add('nav-locked');
+  initCalendar();
+}
+
+// ══ Init ══
+document.body.classList.add('login-open');
+initBday();
+refreshCaptcha();
+document.addEventListener('DOMContentLoaded', initCalendar);
+(function(){
+  var idEl=document.getElementById('idInput');
+  if(idEl){ idEl.dataset.raw='A123456789'; document.getElementById('idReal').value='A123456789'; idEl.value='A●●●456789'; }
+  setTimeout(function(){ var by=document.getElementById('bdayY'); var bm=document.getElementById('bdayM'); var bd=document.getElementById('bdayD'); if(by) by.value='1958'; if(bm) bm.value='03'; if(bd) bd.value='22'; },100);
+})();
+</script>
+
+
+<!-- Loading Overlay -->
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="loading-spinner"></div>
+  <div class="loading-text" id="loadingText">預約送出中...</div>
+  <div class="loading-subtext" id="loadingSubtext">請稍候，正在寫入預約記錄</div>
+</div>
 </body>
+</html>
